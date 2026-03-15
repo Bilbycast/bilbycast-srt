@@ -1,0 +1,27 @@
+[package]
+name = "srt-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust implementation of the SRT (Secure Reliable Transport) protocol"
+license = "MPL-2.0"
+
+[dependencies]
+bytes = "1"
+bitflags = "2"
+log = "0.4"
+rand = "0.10"
+
+# Encryption (feature-gated, all pure Rust)
+aes = { version = "0.8", optional = true }
+ctr = { version = "0.9", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
+sha1 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+aes-kw = { version = "0.2", optional = true }
+
+[features]
+default = ["encryption"]
+encryption = ["dep:aes", "dep:ctr", "dep:aes-gcm", "dep:pbkdf2", "dep:sha1", "dep:hmac", "dep:aes-kw"]
+
+[dev-dependencies]

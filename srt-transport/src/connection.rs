@@ -1,0 +1,107 @@
+//! SRT connection state.
+//!
+//! Combines protocol-level state (handshake, buffers, crypto) with
+//! transport-level resources (channel, addresses).
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use tokio::sync::{Mutex, Notify, watch};
+
+use srt_protocol::buffer::receive::ReceiveBuffer;
+use srt_protocol::buffer::send::SendBuffer;
+use srt_protocol::config::{SrtConfig, SocketStatus};
+use srt_protocol::congestion::CongestionControl;
+use srt_protocol::congestion::live::LiveCC;
+use srt_protocol::packet::seq::SeqNo;
+use srt_protocol::protocol::ack::AckState;
+use srt_protocol::protocol::connection::ConnectionState;
+use srt_protocol::protocol::timer::SrtTimers;
+use srt_protocol::protocol::tsbpd::TsbpdTime;
+use srt_protocol::stats::SrtStats;
+
+/// An SRT connection combining protocol state and transport resources.
+pub struct SrtConnection {
+    /// Connection configuration.
+    pub config: SrtConfig,
+    /// Current connection state.
+    pub state: Mutex<ConnectionState>,
+    /// Local socket address.
+    pub local_addr: SocketAddr,
+    /// Remote peer address (set after handshake).
+    pub peer_addr: Mutex<Option<SocketAddr>>,
+    /// SRT socket ID assigned to this connection.
+    pub socket_id: u32,
+    /// Peer's socket ID (learned during handshake).
+    pub peer_socket_id: Mutex<u32>,
+    /// Send buffer.
+    pub send_buf: Mutex<SendBuffer>,
+    /// Receive buffer.
+    pub recv_buf: Mutex<ReceiveBuffer>,
+    /// ACK processing state.
+    pub ack_state: Mutex<AckState>,
+    /// Timer management.
+    pub timers: Mutex<SrtTimers>,
+    /// Congestion control.
+    pub cc: Mutex<Box<dyn CongestionControl + Send>>,
+    /// TSBPD time management.
+    pub tsbpd: Mutex<TsbpdTime>,
+    /// Performance statistics.
+    pub stats: Mutex<SrtStats>,
+
+    /// Notify when data is available to read.
+    pub recv_data_ready: Notify,
+    /// Notify when send buffer has space.
+    pub send_space_ready: Notify,
+    /// Watch channel for connection state changes.
+    pub state_watch: watch::Sender<SocketStatus>,
+}
+
+impl SrtConnection {
+    /// Create a new connection with default state.
+    pub fn new(config: SrtConfig, local_addr: SocketAddr, socket_id: u32) -> Self {
+        let (state_tx, _) = watch::channel(SocketStatus::Init);
+
+        let initial_seq = SeqNo::new(0);
+        let max_payload = config.max_payload_size();
+        let send_buf_pkts = (config.send_buffer_size as usize) / max_payload.max(1);
+        let recv_buf_pkts = (config.recv_buffer_size as usize) / max_payload.max(1);
+        let latency_ms = config.recv_latency;
+
+        Self {
+            config,
+            state: Mutex::new(ConnectionState::Init),
+            local_addr,
+            peer_addr: Mutex::new(None),
+            socket_id,
+            peer_socket_id: Mutex::new(0),
+            send_buf: Mutex::new(SendBuffer::new(send_buf_pkts, max_payload, initial_seq)),
+            recv_buf: Mutex::new(ReceiveBuffer::new(recv_buf_pkts, initial_seq)),
+            ack_state: Mutex::new(AckState::new(initial_seq)),
+            timers: Mutex::new(SrtTimers::new()),
+            cc: Mutex::new(Box::new(LiveCC::new())),
+            tsbpd: Mutex::new(TsbpdTime::new(Duration::from_millis(latency_ms as u64))),
+            stats: Mutex::new(SrtStats::default()),
+            recv_data_ready: Notify::new(),
+            send_space_ready: Notify::new(),
+            state_watch: state_tx,
+        }
+    }
+
+    /// Update the connection state and broadcast change.
+    pub async fn set_state(&self, new_state: ConnectionState) {
+        let mut state = self.state.lock().await;
+        *state = new_state;
+        let _ = self.state_watch.send(new_state.to_socket_status());
+    }
+
+    /// Get current connection state.
+    pub async fn get_state(&self) -> ConnectionState {
+        *self.state.lock().await
+    }
+
+    /// Check if the connection is active (connected and not broken).
+    pub async fn is_active(&self) -> bool {
+        self.state.lock().await.is_active()
+    }
+}

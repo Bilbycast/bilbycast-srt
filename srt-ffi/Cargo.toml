@@ -1,0 +1,13 @@
+[package]
+name = "srt-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bindings for the SRT protocol"
+license = "MPL-2.0"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+srt-protocol = { path = "../srt-protocol" }
+srt-transport = { path = "../srt-transport" }

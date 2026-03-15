@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "srt-protocol",
+    "srt-transport",
+    "srt-ffi",
+]
+resolver = "2"

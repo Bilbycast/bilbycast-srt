@@ -1,0 +1,15 @@
+[package]
+name = "srt-transport"
+version = "0.1.0"
+edition = "2021"
+description = "Async I/O transport layer for the SRT protocol"
+license = "MPL-2.0"
+
+[dependencies]
+srt-protocol = { path = "../srt-protocol" }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "sync", "macros"] }
+socket2 = { version = "0.6", features = ["all"] }
+log = "0.4"
+bytes = "1"
+bitflags = "2"
+rand = "0.10"

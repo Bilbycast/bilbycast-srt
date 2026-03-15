@@ -1,0 +1,22 @@
+# Rust
+target/
+Cargo.lock
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude / AI tools
+.claude/
+
+# Editor & IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.orig
+
+# Environment
+.env
+.env.local
