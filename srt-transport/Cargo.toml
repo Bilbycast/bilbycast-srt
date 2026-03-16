@@ -7,9 +7,12 @@ license = "MPL-2.0"
 
 [dependencies]
 srt-protocol = { path = "../srt-protocol" }
-tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "sync", "macros"] }
-socket2 = { version = "0.6", features = ["all"] }
-log = "0.4"
-bytes = "1"
-bitflags = "2"
-rand = "0.10"
+tokio = { version = "1.50.0", features = ["net", "rt-multi-thread", "time", "sync", "macros"] }
+socket2 = { version = "0.6.3", features = ["all"] }
+log = "0.4.29"
+bytes = "1.11.1"
+bitflags = "2.11.0"
+rand = "0.10.0"
+
+[dev-dependencies]
+env_logger = "0.11"

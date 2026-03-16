@@ -12,6 +12,7 @@ use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::ControlType;
 use srt_protocol::packet::header::HEADER_SIZE;
 use srt_protocol::protocol::connection::ConnectionState;
+use srt_protocol::protocol::handshake::Handshake;
 
 use crate::connection::SrtConnection;
 use crate::multiplexer::Multiplexer;
@@ -75,7 +76,22 @@ async fn process_control_packet(
 ) {
     match packet.control_type() {
         Some(ControlType::Handshake) => {
-            log::debug!("Received handshake from {}", src_addr);
+            // Parse the handshake from the control packet payload
+            if let Some(hs) = Handshake::deserialize(packet.payload()) {
+                log::debug!(
+                    "Received {:?} handshake from {} (version={}, socket_id={}, cookie={:#x})",
+                    hs.req_type,
+                    src_addr,
+                    hs.version,
+                    hs.socket_id,
+                    hs.cookie
+                );
+                // Deliver the handshake to the connection's handshake channel.
+                // The connector (caller-side) or listener awaits on this channel.
+                let _ = conn.handshake_tx.try_send((hs, src_addr));
+            } else {
+                log::warn!("Failed to parse handshake from {}", src_addr);
+            }
         }
         Some(ControlType::Ack) => {
             let mut stats = conn.stats.lock().await;

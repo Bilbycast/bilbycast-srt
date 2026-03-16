@@ -10,7 +10,7 @@ use bytes::{Bytes, BytesMut};
 
 use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::ControlType;
-use srt_protocol::packet::header::HEADER_SIZE;
+use srt_protocol::packet::header::{EncryptionKeySpec, HEADER_SIZE};
 
 use crate::connection::SrtConnection;
 use crate::multiplexer::Multiplexer;
@@ -38,7 +38,7 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
         };
 
         if has_data {
-            // Get peer address
+            // Get peer address and peer socket ID
             let peer_addr = match *conn.peer_addr.lock().await {
                 Some(a) => a,
                 None => {
@@ -46,16 +46,39 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
                     continue;
                 }
             };
+            let dest_socket_id = *conn.peer_socket_id.lock().await;
 
-            // Get next packet data from the send buffer
-            let entry_data = {
-                let send_buf = conn.send_buf.lock().await;
-                send_buf.peek_next_data()
+            // Take the next entry from the send buffer (removes it)
+            let entry = {
+                let mut send_buf = conn.send_buf.lock().await;
+                send_buf.take_next_entry()
             };
 
-            if let Some(data) = entry_data {
-                // Send it
-                if let Err(e) = mux.send_to(&data, peer_addr).await {
+            if let Some(entry) = entry {
+                // Calculate timestamp (microseconds since connection start).
+                // For now use elapsed from the entry's origin_time as a simple
+                // monotonic timestamp. A proper implementation would use the
+                // connection start time, but this is sufficient for TSBPD.
+                let timestamp = entry.origin_time.elapsed().as_micros() as u32;
+
+                // Build a proper SRT data packet with the 16-byte header
+                let pkt = SrtPacket::new_data(
+                    entry.seq_no,
+                    entry.msg_no,
+                    entry.boundary,
+                    entry.in_order,
+                    EncryptionKeySpec::NoEnc,
+                    false, // not a retransmission
+                    timestamp,
+                    dest_socket_id,
+                    entry.data,
+                );
+
+                // Serialize to wire format
+                let mut buf = BytesMut::with_capacity(pkt.wire_size());
+                pkt.serialize(&mut buf);
+
+                if let Err(e) = mux.send_to(&buf, peer_addr).await {
                     log::error!("Send error: {}", e);
                     if is_fatal_error(&e) {
                         break;
@@ -63,7 +86,7 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
                 } else {
                     let mut stats = conn.stats.lock().await;
                     stats.pkt_sent_total += 1;
-                    stats.byte_sent_total += data.len() as u64;
+                    stats.byte_sent_total += pkt.payload_len() as u64;
                 }
             }
 

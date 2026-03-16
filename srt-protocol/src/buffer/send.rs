@@ -207,6 +207,18 @@ impl SendBuffer {
         self.entries.front().map(|e| e.data.to_vec())
     }
 
+    /// Take the next unsent entry from the front of the buffer.
+    ///
+    /// Removes and returns the front entry, incrementing its send_count.
+    /// Unlike `peek_next_data`, this actually dequeues the entry so it
+    /// won't be sent again (unless re-inserted for retransmission).
+    pub fn take_next_entry(&mut self) -> Option<SendBufferEntry> {
+        self.entries.pop_front().map(|mut e| {
+            e.send_count += 1;
+            e
+        })
+    }
+
     /// Drop messages that have expired (TTL exceeded).
     /// Returns the number of packets dropped.
     pub fn drop_expired(&mut self) -> usize {

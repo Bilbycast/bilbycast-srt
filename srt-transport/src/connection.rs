@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, Notify, watch};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 
 use srt_protocol::buffer::receive::ReceiveBuffer;
 use srt_protocol::buffer::send::SendBuffer;
@@ -16,6 +16,7 @@ use srt_protocol::congestion::live::LiveCC;
 use srt_protocol::packet::seq::SeqNo;
 use srt_protocol::protocol::ack::AckState;
 use srt_protocol::protocol::connection::ConnectionState;
+use srt_protocol::protocol::handshake::Handshake;
 use srt_protocol::protocol::timer::SrtTimers;
 use srt_protocol::protocol::tsbpd::TsbpdTime;
 use srt_protocol::stats::SrtStats;
@@ -55,12 +56,18 @@ pub struct SrtConnection {
     pub send_space_ready: Notify,
     /// Watch channel for connection state changes.
     pub state_watch: watch::Sender<SocketStatus>,
+
+    /// Channel for delivering handshake packets from recv_loop to connector.
+    /// The connector awaits on the receiver; the recv_loop sends parsed handshakes.
+    pub handshake_tx: mpsc::Sender<(Handshake, std::net::SocketAddr)>,
+    pub handshake_rx: Mutex<mpsc::Receiver<(Handshake, std::net::SocketAddr)>>,
 }
 
 impl SrtConnection {
     /// Create a new connection with default state.
     pub fn new(config: SrtConfig, local_addr: SocketAddr, socket_id: u32) -> Self {
         let (state_tx, _) = watch::channel(SocketStatus::Init);
+        let (hs_tx, hs_rx) = mpsc::channel(4);
 
         let initial_seq = SeqNo::new(0);
         let max_payload = config.max_payload_size();
@@ -85,6 +92,8 @@ impl SrtConnection {
             recv_data_ready: Notify::new(),
             send_space_ready: Notify::new(),
             state_watch: state_tx,
+            handshake_tx: hs_tx,
+            handshake_rx: Mutex::new(hs_rx),
         }
     }
 

@@ -189,6 +189,19 @@ impl SrtSocket {
         SrtSocketBuilder::new()
     }
 
+    /// Create a socket from an existing connection (used by listener accept).
+    pub(crate) fn new(
+        connection: Arc<SrtConnection>,
+        multiplexer: Arc<Multiplexer>,
+        state_rx: watch::Receiver<SocketStatus>,
+    ) -> Self {
+        Self {
+            connection,
+            multiplexer,
+            state_rx,
+        }
+    }
+
     /// Send data over the SRT connection.
     pub async fn send(&self, data: &[u8]) -> Result<usize, SrtError> {
         if !self.connection.is_active().await {

@@ -31,16 +31,83 @@ srt-native/
 
 ## Quick Start
 
-### As a Rust dependency
-
-Add `srt-transport` to your `Cargo.toml`:
+### Add the dependency
 
 ```toml
 [dependencies]
 srt-transport = { path = "path/to/srt-native/srt-transport" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 ```
 
-Then use the async API:
+### How SRT connections work
+
+SRT uses a **listener/caller** model (similar to TCP server/client):
+
+1. The **listener** binds to a port and waits for incoming connections
+2. The **caller** connects to the listener's address
+3. They perform a handshake to establish the connection
+4. Once connected, **both sides can send and receive data**
+
+### Step 1: Start a listener
+
+The listener must be running before the caller connects.
+
+```rust
+use srt_transport::SrtListener;
+use std::time::Duration;
+
+// Bind to a port and start listening
+let mut listener = SrtListener::builder()
+    .latency(Duration::from_millis(120))  // buffering latency
+    .live_mode()                           // real-time streaming mode
+    .bind("127.0.0.1:4200".parse()?)
+    .await?;
+
+println!("Listening on {}", listener.local_addr());
+
+// Wait for a caller to connect (blocks until one arrives)
+let socket = listener.accept().await?;
+println!("Caller connected!");
+
+// Receive data from the caller
+let data = socket.recv().await?;
+println!("Got: {}", String::from_utf8_lossy(&data));
+
+// Clean up
+socket.close().await?;
+listener.close().await?;
+```
+
+### Step 2: Connect a caller
+
+The caller connects to the listener and sends data.
+
+```rust
+use srt_transport::SrtSocket;
+use std::time::Duration;
+
+// Connect to the listener
+let socket = SrtSocket::builder()
+    .latency(Duration::from_millis(120))
+    .live_mode()
+    .connect("127.0.0.1:4200".parse()?)
+    .await?;
+
+println!("Connected to listener!");
+
+// Send data
+socket.send(b"Hello SRT!").await?;
+
+// You can also receive data (SRT is bidirectional)
+// let response = socket.recv().await?;
+
+socket.close().await?;
+```
+
+### Step 3: Put it together
+
+In a single process, spawn the listener in a background task so both
+sides can run concurrently:
 
 ```rust
 use srt_transport::{SrtSocket, SrtListener};
@@ -48,39 +115,102 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Sender side
+    // Start the listener
+    let mut listener = SrtListener::builder()
+        .latency(Duration::from_millis(120))
+        .live_mode()
+        .bind("127.0.0.1:0".parse()?)   // port 0 = pick a free port
+        .await?;
+    let addr = listener.local_addr();
+
+    // Run the listener in a background task
+    let listener_task = tokio::spawn(async move {
+        let socket = listener.accept().await.unwrap();
+        let data = socket.recv().await.unwrap();
+        println!("Listener received: {}", String::from_utf8_lossy(&data));
+        socket.close().await.unwrap();
+        listener.close().await.unwrap();
+    });
+
+    // Give the listener a moment to be ready
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect the caller and send data
     let socket = SrtSocket::builder()
         .latency(Duration::from_millis(120))
-        .connect("127.0.0.1:4200".parse()?)
+        .live_mode()
+        .connect(addr)
         .await?;
 
     socket.send(b"Hello SRT!").await?;
+    println!("Caller sent message");
 
-    // Receiver side (in another task/process)
-    let listener = SrtListener::builder()
-        .bind("0.0.0.0:4200".parse()?)
-        .await?;
+    socket.close().await?;
+    listener_task.await?;
 
-    let client = listener.accept().await?;
-    let data = client.recv().await?;
-
+    println!("Success! Data was sent through SRT.");
     Ok(())
 }
 ```
 
 ### With encryption
 
+Both sides must use the same passphrase:
+
 ```rust
-use srt_transport::SrtSocket;
+use srt_transport::{SrtSocket, SrtListener};
 use srt_protocol::config::KeySize;
 use std::time::Duration;
 
+// Listener with encryption
+let mut listener = SrtListener::builder()
+    .latency(Duration::from_millis(120))
+    .encryption("my_secret_passphrase", KeySize::AES256)
+    .bind("127.0.0.1:4200".parse()?)
+    .await?;
+
+// Caller with the same passphrase
 let socket = SrtSocket::builder()
     .latency(Duration::from_millis(120))
-    .encryption("my_passphrase", KeySize::AES256)
+    .encryption("my_secret_passphrase", KeySize::AES256)
     .connect("127.0.0.1:4200".parse()?)
     .await?;
 ```
+
+### Run the included examples
+
+**Test with two terminals (recommended way to verify the library works):**
+
+```bash
+# Terminal 1 — start the listener
+cargo run --example listener -p srt-transport
+
+# Terminal 2 — connect the caller and send data
+cargo run --example caller -p srt-transport
+```
+
+The listener waits for a connection on port 4200. The caller connects,
+sends 10 text messages plus a 1316-byte binary payload, and prints
+connection stats when done. You'll see each message appear on both sides.
+
+**Single-process examples (run everything in one command):**
+
+```bash
+# One-way transfer: caller sends 10 text messages to a listener
+cargo run --example simple_transfer -p srt-transport
+
+# Bidirectional transfer: both sides exchange 50 × 1316-byte packets,
+# then print connection statistics (packets, bytes, losses, RTT)
+cargo run --example bidirectional -p srt-transport
+```
+
+**Enable verbose logging** to see handshake and connection details:
+
+```bash
+RUST_LOG=info cargo run --example listener -p srt-transport
+```
+
+All example source code is in `srt-transport/examples/`.
 
 ## Building
 
@@ -123,14 +253,8 @@ cargo test -p srt-protocol test_handshake_roundtrip
 To verify wire compatibility with the original C++ SRT library:
 
 ```bash
-# Start a Rust SRT listener
-cargo run --example listener -- --bind 0.0.0.0:4200
-
-# Connect with the C++ srt-live-transmit tool
+# Or use srt-live-transmit against a Rust listener bound to port 4200
 srt-live-transmit udp://:1234 srt://127.0.0.1:4200
-
-# Or vice versa - connect Rust to a C++ SRT server
-cargo run --example sender -- --connect 127.0.0.1:4200
 ```
 
 ## Architecture
@@ -238,19 +362,19 @@ All dependencies are pure Rust crates:
 
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
-| `bytes` | 1 | Efficient byte buffer management |
-| `bitflags` | 2 | Type-safe bitflag definitions |
-| `log` | 0.4 | Logging facade |
-| `rand` | 0.10 | Random number generation |
-| `tokio` | 1 | Async runtime (transport only) |
-| `socket2` | 0.6 | Low-level socket configuration |
-| `aes` | 0.8 | AES block cipher (optional) |
-| `ctr` | 0.9 | CTR mode (optional) |
-| `aes-gcm` | 0.10 | AES-GCM AEAD (optional) |
-| `pbkdf2` | 0.12 | Key derivation (optional) |
-| `sha1` | 0.10 | SHA-1 hash (optional) |
-| `hmac` | 0.12 | HMAC (optional) |
-| `aes-kw` | 0.2 | AES Key Wrap RFC 3394 (optional) |
+| `bytes` | `1.11.1` | Efficient byte buffer management |
+| `bitflags` | `2.11.0` | Type-safe bitflag definitions |
+| `log` | `0.4.29` | Logging facade |
+| `rand` | `0.10.0` | Random number generation |
+| `tokio` | `1.50.0` | Async runtime (transport only) |
+| `socket2` | `0.6.3` | Low-level socket configuration |
+| `aes` | `0.8.4` | AES block cipher (optional) |
+| `ctr` | `0.9.2` | CTR mode (optional) |
+| `aes-gcm` | `0.10.3` | AES-GCM AEAD (optional) |
+| `pbkdf2` | `0.12.2` | Key derivation (optional) |
+| `sha1` | `0.10` | SHA-1 hash (optional) |
+| `hmac` | `0.12` | HMAC (optional) |
+| `aes-kw` | `0.2` | AES Key Wrap RFC 3394 (optional) |
 
 ## License
 
