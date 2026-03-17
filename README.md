@@ -1,4 +1,4 @@
-# srt-native - Pure Rust SRT Protocol Implementation
+# bilbycast-srt - Pure Rust SRT Protocol Implementation
 
 A complete, pure-Rust implementation of the [SRT (Secure Reliable Transport)](https://github.com/Haivision/srt) protocol. This project provides the same functionality as the original Haivision C++ SRT library but compiles without any external system dependencies (no OpenSSL, no libssl, no libcrypto).
 
@@ -17,7 +17,7 @@ A complete, pure-Rust implementation of the [SRT (Secure Reliable Transport)](ht
 The project is organized as a Cargo workspace with three crates:
 
 ```
-srt-native/
+bilbycast-srt/
   srt-protocol/    # Pure protocol logic (no I/O, no async runtime)
   srt-transport/   # Async I/O layer (tokio-based networking)
   srt-ffi/         # C FFI compatibility layer (optional)
@@ -35,7 +35,7 @@ srt-native/
 
 ```toml
 [dependencies]
-srt-transport = { path = "path/to/srt-native/srt-transport" }
+srt-transport = { path = "path/to/bilbycast-srt/srt-transport" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 ```
 
@@ -301,11 +301,11 @@ Reference the crates via path or publish to a registry:
 ```toml
 # Via local path
 [dependencies]
-srt-transport = { path = "../srt-native/srt-transport" }
+srt-transport = { path = "../bilbycast-srt/srt-transport" }
 
 # Or just the protocol layer (no tokio dependency)
 [dependencies]
-srt-protocol = { path = "../srt-native/srt-protocol" }
+srt-protocol = { path = "../bilbycast-srt/srt-protocol" }
 ```
 
 ### As a C library
