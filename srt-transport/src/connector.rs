@@ -43,7 +43,7 @@ pub async fn connect(
     // Phase 1: INDUCTION
     let induction_hs = Handshake {
         version: HS_VERSION_UDT4, // Start with v4
-        ext_flags: 0,
+        ext_flags: 2, // SOCK_DGRAM — required by SRT HSv5 spec
         isn: rand::random::<i32>() & 0x7FFF_FFFF,
         mss: conn.config.mss as i32,
         flight_flag_size: conn.config.flight_flag_size as i32,
@@ -125,7 +125,11 @@ pub async fn connect(
         peer_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
 
-    let pkt = build_handshake_packet_with_extensions(&conclusion_hs, peer_socket_id as u32, &ext_buf);
+    // In HSv5, the INDUCTION response may echo our own socket_id in the
+    // handshake payload (C++ SRT does this because the listener hasn't
+    // allocated a new socket yet). Send CONCLUSION to dest_socket_id=0
+    // so it reaches the listener socket on the peer side.
+    let pkt = build_handshake_packet_with_extensions(&conclusion_hs, 0, &ext_buf);
     mux.send_to(&pkt, target)
         .await
         .map_err(|_| SrtError::ConnectionFail)?;
@@ -164,8 +168,9 @@ pub async fn connect(
         return Err(SrtError::ConnectionFail);
     }
 
-    // Store peer socket ID
+    // Store peer socket ID and initialize receive buffer with peer's ISN
     *conn.peer_socket_id.lock().await = conclusion_response.socket_id as u32;
+    conn.set_peer_isn(srt_protocol::packet::seq::SeqNo::new(conclusion_response.isn)).await;
 
     // Connected!
     conn.set_state(ConnectionState::Connected).await;
@@ -175,7 +180,7 @@ pub async fn connect(
 }
 
 /// Build a serialized handshake control packet (base handshake only, no extensions).
-fn build_handshake_packet(hs: &Handshake, dest_socket_id: u32) -> Vec<u8> {
+pub fn build_handshake_packet(hs: &Handshake, dest_socket_id: u32) -> Vec<u8> {
     let mut hs_payload = BytesMut::with_capacity(64);
     hs.serialize(&mut hs_payload);
 

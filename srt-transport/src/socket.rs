@@ -18,6 +18,7 @@ use srt_protocol::stats::SrtStats;
 use crate::channel::UdpChannel;
 use crate::connection::SrtConnection;
 use crate::connector;
+use crate::connector_rendezvous;
 use crate::multiplexer::Multiplexer;
 use crate::recv_loop;
 use crate::send_loop;
@@ -118,6 +119,26 @@ impl SrtSocketBuilder {
         self
     }
 
+    /// Set the connection timeout.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.config.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum payload size per packet.
+    pub fn payload_size(mut self, size: u32) -> Self {
+        self.config.payload_size = size;
+        self
+    }
+
+    /// Enable or disable rendezvous mode.
+    /// In rendezvous mode, both peers simultaneously connect to each other
+    /// (no caller/listener distinction). Use `connect_rendezvous()` to connect.
+    pub fn rendezvous(mut self, enabled: bool) -> Self {
+        self.config.rendezvous = enabled;
+        self
+    }
+
     /// Connect to a remote SRT peer.
     pub async fn connect(self, addr: SocketAddr) -> Result<SrtSocket, SrtError> {
         let bind_addr = self.bind_addr
@@ -153,6 +174,78 @@ impl SrtSocketBuilder {
 
         // Perform handshake
         connector::connect(mux.clone(), conn.clone(), addr).await?;
+
+        let state_rx = conn.state_watch.subscribe();
+
+        Ok(SrtSocket {
+            connection: conn,
+            multiplexer: mux,
+            state_rx,
+        })
+    }
+
+    /// Connect in rendezvous mode (peer-to-peer, no caller/listener).
+    ///
+    /// Both sides must call this simultaneously with each other's address.
+    /// The `local_addr` must have a specific port (not 0) since both peers
+    /// need to know each other's port in advance.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use srt_transport::SrtSocket;
+    ///
+    /// let socket = SrtSocket::builder()
+    ///     .rendezvous(true)
+    ///     .connect_rendezvous(
+    ///         "0.0.0.0:5000".parse()?,  // local bind address
+    ///         "192.168.1.2:5000".parse()?,  // remote peer address
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_rendezvous(
+        self,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+    ) -> Result<SrtSocket, SrtError> {
+        // Rendezvous requires a specific local port (both sides must know each other's port)
+        if local_addr.port() == 0 {
+            return Err(SrtError::ConnectionSetup);
+        }
+
+        let channel = UdpChannel::bind(local_addr).await
+            .map_err(|_| SrtError::ConnectionSetup)?;
+        let actual_local = channel.local_addr();
+
+        let mux = Arc::new(Multiplexer::new(channel));
+        let socket_id = rand::random::<u32>() & 0x3FFF_FFFF;
+        let conn = Arc::new(SrtConnection::new(self.config, actual_local, socket_id));
+
+        // Register in both the routing table (for packets addressed to our socket_id)
+        // and as the rendezvous connection (for packets addressed to dest_socket_id=0)
+        mux.add_connection(socket_id, conn.clone()).await;
+        mux.set_rendezvous(conn.clone()).await;
+
+        // Start send/receive loops
+        let mux_recv = mux.clone();
+        tokio::spawn(async move {
+            recv_loop::run(mux_recv).await;
+        });
+
+        let mux_send = mux.clone();
+        let conn_send = conn.clone();
+        tokio::spawn(async move {
+            send_loop::run(mux_send, conn_send).await;
+        });
+
+        // Perform rendezvous handshake
+        connector_rendezvous::connect_rendezvous(mux.clone(), conn.clone(), remote_addr).await?;
+
+        // Handshake complete — clean up rendezvous routing
+        // (all subsequent packets will be addressed to our socket_id)
+        mux.clear_rendezvous().await;
 
         let state_rx = conn.state_watch.subscribe();
 

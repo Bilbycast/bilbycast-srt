@@ -38,10 +38,22 @@ pub async fn run(mux: Arc<Multiplexer>) {
                 let data = &buf[..len];
                 if let Some(packet) = SrtPacket::deserialize(data) {
                     let dest_id = packet.dest_socket_id();
+                    log::trace!(
+                        "recv_loop: packet from {} dest_id={} ctrl={} type={:?} len={}",
+                        src_addr, dest_id, packet.is_control(),
+                        packet.control_type(), len
+                    );
 
                     if let Some(conn) = mux.route(dest_id).await {
                         process_packet(conn, packet, src_addr).await;
+                    } else {
+                        log::debug!(
+                            "recv_loop: no route for dest_id={} from {} (ctrl={}, type={:?})",
+                            dest_id, src_addr, packet.is_control(), packet.control_type()
+                        );
                     }
+                } else {
+                    log::debug!("recv_loop: failed to deserialize packet ({} bytes) from {}", len, src_addr);
                 }
             }
             Err(e) => {
@@ -61,6 +73,10 @@ async fn process_packet(
     packet: SrtPacket,
     src_addr: SocketAddr,
 ) {
+    // Reset the idle/expiration timer on any packet from the peer.
+    // This is how SRT detects that the peer is still alive.
+    conn.timers.lock().await.on_response_received();
+
     if packet.is_control() {
         process_control_packet(&conn, &packet, src_addr).await;
     } else {
@@ -88,7 +104,9 @@ async fn process_control_packet(
                 );
                 // Deliver the handshake to the connection's handshake channel.
                 // The connector (caller-side) or listener awaits on this channel.
-                let _ = conn.handshake_tx.try_send((hs, src_addr));
+                if let Err(e) = conn.handshake_tx.try_send((hs, src_addr)) {
+                    log::error!("Failed to deliver handshake to connection: {} (channel full or closed)", e);
+                }
             } else {
                 log::warn!("Failed to parse handshake from {}", src_addr);
             }

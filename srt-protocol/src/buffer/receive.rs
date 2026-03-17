@@ -77,6 +77,11 @@ impl ReceiveBuffer {
         }
     }
 
+    /// Reset the starting sequence number (used after handshake to set peer's ISN).
+    pub fn set_start_seq(&mut self, seq: SeqNo) {
+        self.start_seq = seq;
+    }
+
     /// Insert a received packet into the buffer.
     ///
     /// Returns true if the packet was successfully inserted (not a duplicate).

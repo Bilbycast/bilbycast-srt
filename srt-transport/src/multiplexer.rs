@@ -24,6 +24,9 @@ pub struct Multiplexer {
     routes: RwLock<HashMap<u32, Arc<SrtConnection>>>,
     /// Listener socket (if any) for handling new connections.
     listener: RwLock<Option<Arc<SrtConnection>>>,
+    /// Rendezvous socket (if any) for receiving WAVEAHAND packets at dest_socket_id=0.
+    /// Mutually exclusive with listener — a multiplexer is either in listener or rendezvous mode.
+    rendezvous: RwLock<Option<Arc<SrtConnection>>>,
 }
 
 impl Multiplexer {
@@ -33,6 +36,7 @@ impl Multiplexer {
             channel: Arc::new(channel),
             routes: RwLock::new(HashMap::new()),
             listener: RwLock::new(None),
+            rendezvous: RwLock::new(None),
         }
     }
 
@@ -60,12 +64,31 @@ impl Multiplexer {
         *listener = None;
     }
 
+    /// Set the rendezvous socket for this multiplexer.
+    /// In rendezvous mode, WAVEAHAND packets arrive at dest_socket_id=0
+    /// and need to be routed to the rendezvous connection.
+    pub async fn set_rendezvous(&self, conn: Arc<SrtConnection>) {
+        let mut rdv = self.rendezvous.write().await;
+        *rdv = Some(conn);
+    }
+
+    /// Clear the rendezvous socket (called after handshake completes).
+    pub async fn clear_rendezvous(&self) {
+        let mut rdv = self.rendezvous.write().await;
+        *rdv = None;
+    }
+
     /// Look up the connection for a given destination socket ID.
     pub async fn route(&self, dest_socket_id: u32) -> Option<Arc<SrtConnection>> {
-        // If dest_socket_id is 0, route to listener (handshake for new connections)
+        // If dest_socket_id is 0, route to listener or rendezvous connection.
+        // Listener and rendezvous are mutually exclusive modes.
         if dest_socket_id == 0 {
             let listener = self.listener.read().await;
-            return listener.clone();
+            if listener.is_some() {
+                return listener.clone();
+            }
+            let rdv = self.rendezvous.read().await;
+            return rdv.clone();
         }
 
         let routes = self.routes.read().await;

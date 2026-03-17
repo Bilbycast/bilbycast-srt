@@ -81,6 +81,18 @@ impl SrtListenerBuilder {
         self
     }
 
+    /// Set the peer idle timeout.
+    pub fn peer_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.config.peer_idle_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum payload size per packet.
+    pub fn payload_size(mut self, size: u32) -> Self {
+        self.config.payload_size = size;
+        self
+    }
+
     /// Bind and start listening.
     pub async fn bind(self, addr: SocketAddr) -> Result<SrtListener, SrtError> {
         let channel = UdpChannel::bind(addr).await
@@ -314,6 +326,8 @@ async fn accept_loop(
         ));
         *new_conn.peer_addr.lock().await = Some(conclusion_addr);
         *new_conn.peer_socket_id.lock().await = conclusion_hs.socket_id as u32;
+        // Initialize receive buffer with the peer's ISN so ACKs use the correct sequence range.
+        new_conn.set_peer_isn(srt_protocol::packet::seq::SeqNo::new(conclusion_hs.isn)).await;
         new_conn.set_state(ConnectionState::Connected).await;
 
         // Register the new connection in the multiplexer for data routing

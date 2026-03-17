@@ -42,6 +42,7 @@
 //! - [`socket`] - `SrtSocket` and `SrtSocketBuilder` (main client API)
 //! - [`listener`] - `SrtListener` for accepting incoming connections
 //! - [`connector`] - HSv5 caller-side handshake implementation
+//! - [`connector_rendezvous`] - HSv5 rendezvous (peer-to-peer) handshake
 //! - [`channel`] - UDP channel wrapper over `tokio::net::UdpSocket`
 //! - [`multiplexer`] - Routes packets across connections on one UDP port
 //! - [`connection`] - Internal connection state (protocol + transport)
@@ -52,6 +53,7 @@
 pub mod channel;
 pub mod connection;
 pub mod connector;
+pub mod connector_rendezvous;
 pub mod epoll;
 pub mod listener;
 pub mod manager;

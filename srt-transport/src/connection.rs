@@ -98,10 +98,17 @@ impl SrtConnection {
     }
 
     /// Update the connection state and broadcast change.
+    /// When transitioning to a non-active state (Broken, Closing, Closed),
+    /// wakes up any callers blocked on recv() so they can observe the error.
     pub async fn set_state(&self, new_state: ConnectionState) {
         let mut state = self.state.lock().await;
         *state = new_state;
         let _ = self.state_watch.send(new_state.to_socket_status());
+
+        // Wake up any blocked recv() so it can see the state change and return an error.
+        if !new_state.is_active() {
+            self.recv_data_ready.notify_waiters();
+        }
     }
 
     /// Get current connection state.
@@ -112,5 +119,12 @@ impl SrtConnection {
     /// Check if the connection is active (connected and not broken).
     pub async fn is_active(&self) -> bool {
         self.state.lock().await.is_active()
+    }
+
+    /// Set the peer's Initial Sequence Number (ISN) on the receive buffer
+    /// and ACK state. Must be called after handshake, before data flows.
+    pub async fn set_peer_isn(&self, isn: SeqNo) {
+        self.recv_buf.lock().await.set_start_seq(isn);
+        *self.ack_state.lock().await = AckState::new(isn);
     }
 }

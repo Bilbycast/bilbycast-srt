@@ -18,8 +18,21 @@ pub struct UdpChannel {
 
 impl UdpChannel {
     /// Create a new UDP channel bound to the given address.
+    ///
+    /// Enables `SO_REUSEADDR` so that the socket can be rebound quickly
+    /// after a connection drops (avoids "address already in use" errors).
     pub async fn bind(addr: SocketAddr) -> io::Result<Self> {
-        let socket = UdpSocket::bind(addr).await?;
+        let domain = if addr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let sock2 = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+        sock2.set_reuse_address(true)?;
+        sock2.set_nonblocking(true)?;
+        sock2.bind(&addr.into())?;
+        let std_socket: std::net::UdpSocket = sock2.into();
+        let socket = UdpSocket::from_std(std_socket)?;
         let local_addr = socket.local_addr()?;
         Ok(Self { socket, local_addr })
     }
