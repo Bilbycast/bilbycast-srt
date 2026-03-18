@@ -328,6 +328,9 @@ async fn accept_loop(
         *new_conn.peer_socket_id.lock().await = conclusion_hs.socket_id as u32;
         // Initialize receive buffer with the peer's ISN so ACKs use the correct sequence range.
         new_conn.set_peer_isn(srt_protocol::packet::seq::SeqNo::new(conclusion_hs.isn)).await;
+        // Our send buffer starts at SeqNo(0) (set in SrtConnection::new).
+        // Advertise ISN=0 in CONCLUSION so the peer's receive buffer is aligned.
+        let listener_isn: i32 = 0;
         new_conn.set_state(ConnectionState::Connected).await;
 
         // Register the new connection in the multiplexer for data routing
@@ -359,7 +362,7 @@ async fn accept_loop(
         let conclusion_response = Handshake {
             version: HS_VERSION_SRT1,
             ext_flags: HS_EXT_HSREQ, // echo back that we support HSREQ
-            isn: conclusion_hs.isn,
+            isn: listener_isn,
             mss: config.mss as i32,
             flight_flag_size: config.flight_flag_size as i32,
             req_type: HandshakeType::Conclusion,

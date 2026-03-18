@@ -127,4 +127,12 @@ impl SrtConnection {
         self.recv_buf.lock().await.set_start_seq(isn);
         *self.ack_state.lock().await = AckState::new(isn);
     }
+
+    /// Set our own ISN on the send buffer. Used by the listener to align the
+    /// send buffer with the ISN advertised in the CONCLUSION response.
+    pub async fn set_own_isn(&self, isn: SeqNo) {
+        let max_payload = self.config.max_payload_size();
+        let capacity = (self.config.send_buffer_size as usize) / max_payload.max(1);
+        *self.send_buf.lock().await = SendBuffer::new(capacity, max_payload, isn);
+    }
 }
