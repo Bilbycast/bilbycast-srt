@@ -44,7 +44,7 @@ pub async fn connect(
     let induction_hs = Handshake {
         version: HS_VERSION_UDT4, // Start with v4
         ext_flags: 2, // SOCK_DGRAM — required by SRT HSv5 spec
-        isn: rand::random::<i32>() & 0x7FFF_FFFF,
+        isn: 0, // Must match send buffer starting sequence (SeqNo(0))
         mss: conn.config.mss as i32,
         flight_flag_size: conn.config.flight_flag_size as i32,
         req_type: HandshakeType::Induction,
