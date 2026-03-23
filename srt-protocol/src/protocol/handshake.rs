@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT HSv5 handshake protocol.
 //!
 //! Implements the SRT handshake state machine for connection establishment.

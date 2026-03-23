@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT Rendezvous mode: peer-to-peer connection without caller/listener roles.
 //!
 //! Both peers simultaneously connect to each other on the same port.

@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! 31-bit circular sequence number arithmetic for SRT packets.
 //!
 //! SRT uses 31-bit sequence numbers (bit 31 is reserved for the control flag).

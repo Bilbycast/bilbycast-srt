@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! Pure Rust implementation of the SRT (Secure Reliable Transport) protocol.
 //!
 //! This crate provides all SRT protocol logic without any I/O or async runtime

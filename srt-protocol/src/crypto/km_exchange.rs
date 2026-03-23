@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! Key Material (KM) message encoding/decoding for KMREQ/KMRSP exchange.
 //!
 //! During the SRT handshake, the initiator sends a KMREQ containing

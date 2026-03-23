@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! AES-GCM (Galois/Counter Mode) authenticated encryption for SRT data packets.
 //!
 //! GCM mode provides both confidentiality and authentication (AEAD).

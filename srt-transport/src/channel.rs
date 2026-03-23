@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! UDP channel wrapper over tokio::net::UdpSocket.
 //!
 //! Maps to C++ `CChannel`. Provides async send/receive for SRT packets

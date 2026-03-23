@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! SRT encryption using pure-Rust cryptography.
 //!
 //! This module implements the SRT encryption subsystem using [RustCrypto](https://github.com/RustCrypto)

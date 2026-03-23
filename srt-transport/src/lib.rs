@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! Async I/O transport layer for the SRT protocol.
 //!
 //! This crate provides ready-to-use [`SrtSocket`] and [`SrtListener`] types

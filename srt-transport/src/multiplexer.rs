@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! Multiplexer: multiple SRT sockets sharing one UDP port.
 //!
 //! Maps to C++ `CMultiplexer`. Routes incoming packets to the correct

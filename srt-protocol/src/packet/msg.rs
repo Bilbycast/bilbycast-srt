@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
+// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// SPDX-License-Identifier: MPL-2.0
+
 //! 26-bit message sequence number with wrapping.
 //!
 //! Message numbers in SRT use 26 bits (bits 0-25 of the MSGNO header field).
