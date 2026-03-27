@@ -90,7 +90,7 @@ impl FecGroup {
         }
         let missing: Vec<usize> = self.received.iter()
             .enumerate()
-            .filter(|(_, &r)| !r)
+            .filter(|&(_, &r)| !r)
             .map(|(i, _)| i)
             .collect();
         if missing.len() == 1 {

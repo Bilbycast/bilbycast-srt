@@ -6,7 +6,7 @@
 
 //! C FFI bindings for the Rust SRT implementation.
 //!
-//! This crate provides `#[no_mangle] extern "C"` functions matching the
+//! This crate provides `#[unsafe(no_mangle)] extern "C"` functions matching the
 //! [original SRT C API](https://github.com/Haivision/srt/blob/master/srtcore/srt.h).
 //! It can be compiled as a shared library (`.so`/`.dylib`/`.dll`) or static
 //! library (`.a`) and used as a drop-in replacement for the C++ SRT library.
@@ -41,7 +41,7 @@ static INITIALIZED: OnceLock<bool> = OnceLock::new();
 /// Initialize the SRT library. Must be called before any other SRT function.
 ///
 /// Returns 0 on success, -1 on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_startup() -> c_int {
     match INITIALIZED.set(true) {
         Ok(_) => 0,
@@ -52,13 +52,13 @@ pub extern "C" fn srt_startup() -> c_int {
 /// Clean up the SRT library. Should be called when done using SRT.
 ///
 /// Returns 0 on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_cleanup() -> c_int {
     0
 }
 
 /// Get the SRT library version as an integer (major * 0x10000 + minor * 0x100 + patch).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_getversion() -> c_int {
     srt_protocol::config::SRT_VERSION as c_int
 }
@@ -68,7 +68,7 @@ pub extern "C" fn srt_getversion() -> c_int {
 /// Create a new SRT socket.
 ///
 /// Returns a valid SRTSOCKET on success, or SRT_INVALID_SOCK on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_create_socket() -> SRTSOCKET {
     // TODO: integrate with the async runtime manager
     // For now return a placeholder
@@ -78,7 +78,7 @@ pub extern "C" fn srt_create_socket() -> SRTSOCKET {
 /// Close an SRT socket.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_close(_u: SRTSOCKET) -> c_int {
     // TODO: implement
     0
@@ -89,7 +89,7 @@ pub extern "C" fn srt_close(_u: SRTSOCKET) -> c_int {
 /// Bind an SRT socket to a local address.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_bind(_u: SRTSOCKET, _name: *const c_void, _namelen: c_int) -> c_int {
     // TODO: implement
     SRT_ERROR
@@ -98,7 +98,7 @@ pub extern "C" fn srt_bind(_u: SRTSOCKET, _name: *const c_void, _namelen: c_int)
 /// Set the socket to listening mode.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_listen(_u: SRTSOCKET, _backlog: c_int) -> c_int {
     // TODO: implement
     SRT_ERROR
@@ -107,7 +107,7 @@ pub extern "C" fn srt_listen(_u: SRTSOCKET, _backlog: c_int) -> c_int {
 /// Accept an incoming connection on a listening socket.
 ///
 /// Returns the accepted socket on success, or SRT_INVALID_SOCK on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_accept(
     _u: SRTSOCKET,
     _addr: *mut c_void,
@@ -120,7 +120,7 @@ pub extern "C" fn srt_accept(
 /// Connect to a remote SRT peer.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_connect(
     _u: SRTSOCKET,
     _name: *const c_void,
@@ -135,7 +135,7 @@ pub extern "C" fn srt_connect(
 /// Send data over an SRT socket.
 ///
 /// Returns the number of bytes sent on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_send(
     _u: SRTSOCKET,
     _buf: *const c_char,
@@ -148,7 +148,7 @@ pub extern "C" fn srt_send(
 /// Send a message over an SRT socket with TTL and in-order options.
 ///
 /// Returns the number of bytes sent on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_sendmsg(
     _u: SRTSOCKET,
     _buf: *const c_char,
@@ -163,7 +163,7 @@ pub extern "C" fn srt_sendmsg(
 /// Receive data from an SRT socket.
 ///
 /// Returns the number of bytes received on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_recv(
     _u: SRTSOCKET,
     _buf: *mut c_char,
@@ -176,7 +176,7 @@ pub extern "C" fn srt_recv(
 /// Receive a message from an SRT socket.
 ///
 /// Returns the number of bytes received on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_recvmsg(
     _u: SRTSOCKET,
     _buf: *mut c_char,
@@ -191,7 +191,7 @@ pub extern "C" fn srt_recvmsg(
 /// Set a socket option.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_setsockopt(
     _u: SRTSOCKET,
     _level: c_int,
@@ -206,7 +206,7 @@ pub extern "C" fn srt_setsockopt(
 /// Get a socket option.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_getsockopt(
     _u: SRTSOCKET,
     _level: c_int,
@@ -219,7 +219,7 @@ pub extern "C" fn srt_getsockopt(
 }
 
 /// Set a socket option (SRT-specific shorthand, same as srt_setsockopt with level=0).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_setsockflag(
     u: SRTSOCKET,
     opt: c_int,
@@ -230,7 +230,7 @@ pub extern "C" fn srt_setsockflag(
 }
 
 /// Get a socket option (SRT-specific shorthand).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_getsockflag(
     u: SRTSOCKET,
     opt: c_int,
@@ -245,7 +245,7 @@ pub extern "C" fn srt_getsockflag(
 /// Create a new epoll container.
 ///
 /// Returns epoll ID on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_epoll_create() -> c_int {
     // TODO: implement
     SRT_ERROR
@@ -254,7 +254,7 @@ pub extern "C" fn srt_epoll_create() -> c_int {
 /// Add a socket to an epoll container.
 ///
 /// Returns 0 on success, SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_epoll_add_usock(
     _eid: c_int,
     _u: SRTSOCKET,
@@ -265,7 +265,7 @@ pub extern "C" fn srt_epoll_add_usock(
 }
 
 /// Remove a socket from an epoll container.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_epoll_remove_usock(_eid: c_int, _u: SRTSOCKET) -> c_int {
     // TODO: implement
     SRT_ERROR
@@ -274,7 +274,7 @@ pub extern "C" fn srt_epoll_remove_usock(_eid: c_int, _u: SRTSOCKET) -> c_int {
 /// Wait for events on an epoll container.
 ///
 /// Returns number of ready sockets on success, or SRT_ERROR on error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_epoll_wait(
     _eid: c_int,
     _readfds: *mut SRTSOCKET,
@@ -292,7 +292,7 @@ pub extern "C" fn srt_epoll_wait(
 }
 
 /// Release (destroy) an epoll container.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_epoll_release(_eid: c_int) -> c_int {
     // TODO: implement
     SRT_ERROR
@@ -301,20 +301,20 @@ pub extern "C" fn srt_epoll_release(_eid: c_int) -> c_int {
 // ── Error handling ──
 
 /// Get the last error code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_getlasterror(_errno_loc: *mut c_int) -> c_int {
     // TODO: thread-local error tracking
     0
 }
 
 /// Clear the last error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_clearlasterror() {
     // TODO: implement
 }
 
 /// Get a human-readable error string for an error code.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_strerror(_code: c_int, _errbuflen: c_int) -> *const c_char {
     // Return a static string for now
     b"SRT error\0".as_ptr() as *const c_char
@@ -325,7 +325,7 @@ pub extern "C" fn srt_strerror(_code: c_int, _errbuflen: c_int) -> *const c_char
 /// Get the current socket status.
 ///
 /// Returns the socket status as an integer matching SRTS_* constants.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_getsockstate(_u: SRTSOCKET) -> c_int {
     // TODO: implement
     1 // SRTS_INIT
@@ -334,7 +334,7 @@ pub extern "C" fn srt_getsockstate(_u: SRTSOCKET) -> c_int {
 // ── Logging ──
 
 /// Set the log level for SRT logging.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn srt_setloglevel(_ll: c_int) {
     // TODO: map to Rust log levels
 }

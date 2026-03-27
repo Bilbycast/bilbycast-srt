@@ -1,7 +1,7 @@
 [package]
 name = "srt-transport"
 version = "0.1.2"
-edition = "2021"
+edition = "2024"
 description = "Async I/O transport layer for the SRT protocol"
 license = "MPL-2.0"
 
