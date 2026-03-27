@@ -261,6 +261,26 @@ impl ReceiveBuffer {
         dropped
     }
 
+    /// Drop a range of packets by sequence number (used for DropReq from sender).
+    /// Returns the number of packets actually dropped.
+    pub fn drop_range(&mut self, first: SeqNo, last: SeqNo) -> usize {
+        let mut dropped = 0;
+        let count = SeqNo::offset(first, last) + 1;
+        for i in 0..count {
+            let seq = first.add(i);
+            let offset = SeqNo::offset(self.start_seq, seq);
+            if offset >= 0 && (offset as usize) < self.capacity {
+                let pos = (self.start_pos + offset as usize) % self.capacity;
+                if self.entries[pos].is_some() {
+                    self.entries[pos] = None;
+                    self.valid_count -= 1;
+                    dropped += 1;
+                }
+            }
+        }
+        dropped
+    }
+
     fn advance_start(&mut self, count: usize) {
         self.start_pos = (self.start_pos + count) % self.capacity;
         self.start_seq = self.start_seq.add(count as i32);

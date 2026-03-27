@@ -161,6 +161,10 @@ pub struct SrtConfig {
     pub min_input_bw: i64,
     /// Overhead bandwidth as percentage over input rate.
     pub overhead_bw: i32,
+    /// Maximum retransmission bandwidth in bytes/sec (-1 = unlimited, 0 = disable retransmit).
+    /// Maps to SRTO_MAXREXMITBW. Uses a token bucket shaper to prevent retransmissions
+    /// from starving new data on lossy links.
+    pub max_rexmit_bw: i64,
 
     // ── Live mode ──
 
@@ -266,6 +270,7 @@ impl Default for SrtConfig {
             input_bw: 0,
             min_input_bw: 0,
             overhead_bw: 25,
+            max_rexmit_bw: -1, // unlimited by default
 
             // Live mode
             tsbpd_mode: true,

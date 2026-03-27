@@ -13,11 +13,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
 use srt_protocol::config::{KeySize, SrtConfig, SocketStatus};
 use srt_protocol::error::SrtError;
+use srt_protocol::packet::SrtPacket;
+use srt_protocol::packet::control::ControlType;
+use srt_protocol::packet::header::HEADER_SIZE;
 use srt_protocol::protocol::connection::ConnectionState;
 use srt_protocol::stats::SrtStats;
 
@@ -134,6 +137,18 @@ impl SrtSocketBuilder {
     /// Set the maximum payload size per packet.
     pub fn payload_size(mut self, size: u32) -> Self {
         self.config.payload_size = size;
+        self
+    }
+
+    /// Set the maximum retransmission bandwidth in bytes per second.
+    ///
+    /// Uses a token bucket shaper to limit retransmission bandwidth,
+    /// preventing retransmissions from starving new data on lossy links.
+    /// - `-1` (default): unlimited retransmission bandwidth
+    /// - `0`: disable retransmissions entirely
+    /// - `> 0`: limit to this many bytes per second
+    pub fn max_rexmit_bw(mut self, bw: i64) -> Self {
+        self.config.max_rexmit_bw = bw;
         self
     }
 
@@ -346,6 +361,14 @@ impl SrtSocket {
         *self.connection.peer_addr.lock().await
     }
 
+    /// Get the Stream ID for this connection.
+    ///
+    /// For accepted sockets (listener side), this is the Stream ID sent by the caller.
+    /// For caller sockets, this is the Stream ID set via the builder.
+    pub fn stream_id(&self) -> &str {
+        &self.connection.config.stream_id
+    }
+
     /// Get connection statistics.
     pub async fn stats(&self) -> SrtStats {
         self.connection.stats.lock().await.clone()
@@ -366,9 +389,36 @@ impl SrtSocket {
     }
 
     /// Close the connection gracefully.
+    ///
+    /// Sends a SHUTDOWN control packet to the peer so it knows we're closing,
+    /// then waits briefly for pending data to drain before cleaning up.
     pub async fn close(&self) -> Result<(), SrtError> {
         self.connection.set_state(ConnectionState::Closing).await;
-        // TODO: send SHUTDOWN control packet, drain buffers
+
+        // Send SHUTDOWN control packet to peer
+        if let Some(peer_addr) = *self.connection.peer_addr.lock().await {
+            let dest_socket_id = *self.connection.peer_socket_id.lock().await;
+            let shutdown = SrtPacket::new_control(
+                ControlType::Shutdown,
+                0,
+                0,
+                0,
+                dest_socket_id,
+                Bytes::new(),
+            );
+            let mut buf = BytesMut::with_capacity(HEADER_SIZE);
+            shutdown.serialize(&mut buf);
+            let _ = self.multiplexer.send_to(&buf, peer_addr).await;
+        }
+
+        // Brief drain period: allow in-flight retransmissions to complete.
+        // The linger timeout controls how long we wait (capped at 1s for graceful close).
+        if let Some(linger) = self.connection.config.linger {
+            if !linger.is_zero() {
+                tokio::time::sleep(linger.min(Duration::from_secs(1))).await;
+            }
+        }
+
         self.connection.set_state(ConnectionState::Closed).await;
         self.multiplexer.remove_connection(self.connection.socket_id).await;
         Ok(())

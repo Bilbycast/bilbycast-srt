@@ -14,11 +14,14 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, Notify, mpsc, watch};
 
+use srt_protocol::buffer::loss_list::{ReceiveLossList, SendLossList};
 use srt_protocol::buffer::receive::ReceiveBuffer;
 use srt_protocol::buffer::send::SendBuffer;
 use srt_protocol::config::{SrtConfig, SocketStatus};
 use srt_protocol::congestion::CongestionControl;
 use srt_protocol::congestion::live::LiveCC;
+use srt_protocol::congestion::token_bucket::TokenBucket;
+use srt_protocol::crypto::{CryptoControl, CryptoMode};
 use srt_protocol::packet::seq::SeqNo;
 use srt_protocol::protocol::ack::AckState;
 use srt_protocol::protocol::connection::ConnectionState;
@@ -26,6 +29,7 @@ use srt_protocol::protocol::handshake::Handshake;
 use srt_protocol::protocol::timer::SrtTimers;
 use srt_protocol::protocol::tsbpd::TsbpdTime;
 use srt_protocol::stats::SrtStats;
+use srt_protocol::window::{AckWindow, PktTimeWindow};
 
 /// An SRT connection combining protocol state and transport resources.
 pub struct SrtConnection {
@@ -55,6 +59,22 @@ pub struct SrtConnection {
     pub tsbpd: Mutex<TsbpdTime>,
     /// Performance statistics.
     pub stats: Mutex<SrtStats>,
+    /// Send-side loss list (populated from NAK reports).
+    pub send_loss_list: Mutex<SendLossList>,
+    /// Receive-side loss list (gaps detected in received sequence).
+    pub recv_loss_list: Mutex<ReceiveLossList>,
+    /// ACK window for RTT measurement via ACKACK.
+    pub ack_window: Mutex<AckWindow>,
+    /// Highest sequence number received (for gap detection).
+    pub highest_recv_seq: Mutex<SeqNo>,
+    /// Peer's advertised flow window (updated from ACK packets).
+    pub peer_flow_window: Mutex<u32>,
+    /// Packet arrival time window for bandwidth estimation.
+    pub pkt_time_window: Mutex<PktTimeWindow>,
+    /// Crypto control for encryption/decryption (None if no passphrase configured).
+    pub crypto: Mutex<Option<CryptoControl>>,
+    /// Token bucket shaper for retransmission bandwidth control (SRTO_MAXREXMITBW).
+    pub rexmit_shaper: Mutex<TokenBucket>,
 
     /// Notify when data is available to read.
     pub recv_data_ready: Notify,
@@ -65,8 +85,9 @@ pub struct SrtConnection {
 
     /// Channel for delivering handshake packets from recv_loop to connector.
     /// The connector awaits on the receiver; the recv_loop sends parsed handshakes.
-    pub handshake_tx: mpsc::Sender<(Handshake, std::net::SocketAddr)>,
-    pub handshake_rx: Mutex<mpsc::Receiver<(Handshake, std::net::SocketAddr)>>,
+    /// (Handshake, peer address, raw extension bytes after 48-byte header)
+    pub handshake_tx: mpsc::Sender<(Handshake, std::net::SocketAddr, bytes::Bytes)>,
+    pub handshake_rx: Mutex<mpsc::Receiver<(Handshake, std::net::SocketAddr, bytes::Bytes)>>,
 }
 
 impl SrtConnection {
@@ -80,6 +101,25 @@ impl SrtConnection {
         let send_buf_pkts = (config.send_buffer_size as usize) / max_payload.max(1);
         let recv_buf_pkts = (config.recv_buffer_size as usize) / max_payload.max(1);
         let latency_ms = config.recv_latency;
+        let flow_window = config.flight_flag_size;
+        let max_rexmit_bw = config.max_rexmit_bw;
+        let mss = config.mss;
+
+        // Initialize crypto if passphrase is configured
+        let crypto = if config.encryption_enabled() {
+            use srt_protocol::crypto::key_material;
+            let salt = key_material::generate_salt();
+            let kek = key_material::derive_kek(&config.passphrase, &salt, config.key_size);
+            let sek = key_material::generate_sek(config.key_size);
+
+            let mut cc = CryptoControl::new(config.key_size, CryptoMode::AesCtr);
+            cc.kek = Some(kek);
+            cc.salt = salt;
+            cc.keys.set_key(srt_protocol::crypto::KeyIndex::Even, sek);
+            Some(cc)
+        } else {
+            None
+        };
 
         Self {
             config,
@@ -95,6 +135,14 @@ impl SrtConnection {
             cc: Mutex::new(Box::new(LiveCC::new())),
             tsbpd: Mutex::new(TsbpdTime::new(Duration::from_millis(latency_ms as u64))),
             stats: Mutex::new(SrtStats::default()),
+            send_loss_list: Mutex::new(SendLossList::new()),
+            recv_loss_list: Mutex::new(ReceiveLossList::new()),
+            ack_window: Mutex::new(AckWindow::new(1024)),
+            highest_recv_seq: Mutex::new(initial_seq),
+            peer_flow_window: Mutex::new(flow_window),
+            pkt_time_window: Mutex::new(PktTimeWindow::new()),
+            crypto: Mutex::new(crypto),
+            rexmit_shaper: Mutex::new(TokenBucket::new(max_rexmit_bw, mss)),
             recv_data_ready: Notify::new(),
             send_space_ready: Notify::new(),
             state_watch: state_tx,
@@ -132,6 +180,8 @@ impl SrtConnection {
     pub async fn set_peer_isn(&self, isn: SeqNo) {
         self.recv_buf.lock().await.set_start_seq(isn);
         *self.ack_state.lock().await = AckState::new(isn);
+        *self.highest_recv_seq.lock().await = isn;
+        self.recv_loss_list.lock().await.clear();
     }
 
     /// Set our own ISN on the send buffer. Used by the listener to align the

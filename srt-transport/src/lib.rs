@@ -73,4 +73,5 @@ pub use srt_protocol;
 // Re-exports for convenience
 pub use socket::{SrtSocket, SrtSocketBuilder};
 pub use listener::{SrtListener, SrtListenerBuilder};
+pub use srt_protocol::access_control::{AccessControl, AccessControlFn, HandshakeInfo};
 pub use epoll::{SrtEpoll, SrtEpollOpt, SrtEpollEvent};

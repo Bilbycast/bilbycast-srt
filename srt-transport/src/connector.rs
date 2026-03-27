@@ -15,17 +15,21 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 
 use srt_protocol::config::srt_options::SrtFlags;
 use srt_protocol::config::SRT_VERSION;
+use srt_protocol::crypto::KeyIndex;
+use srt_protocol::crypto::km_exchange::{CipherType, KeyMaterialMessage};
+use srt_protocol::crypto::key_material;
 use srt_protocol::error::SrtError;
 use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::ControlType;
 use srt_protocol::packet::header::HEADER_SIZE;
 use srt_protocol::protocol::connection::ConnectionState;
 use srt_protocol::protocol::handshake::{
-    HS_EXT_HSREQ, HS_VERSION_SRT1, HS_VERSION_UDT4, Handshake, HandshakeType, SrtHsExtension,
+    HS_EXT_HSREQ, HS_EXT_KMREQ, HS_VERSION_SRT1, HS_VERSION_UDT4, Handshake,
+    HandshakeExtension, HandshakeType, SrtHsExtension,
 };
 
 use crate::connection::SrtConnection;
@@ -70,7 +74,7 @@ pub async fn connect(
     let induction_response = {
         let mut rx = conn.handshake_rx.lock().await;
         match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Some((hs, _addr))) => hs,
+            Ok(Some((hs, _addr, _ext))) => hs,
             Ok(None) => {
                 log::error!("HSv5 caller: handshake channel closed");
                 conn.set_state(ConnectionState::Broken).await;
@@ -119,9 +123,46 @@ pub async fn connect(
     ext_buf.extend_from_slice(&((1u32 << 16) | 4u32).to_be_bytes());
     srt_ext.serialize(&mut ext_buf);
 
+    // Build KMREQ extension if encryption is enabled
+    let mut ext_flags = HS_EXT_HSREQ;
+    {
+        let crypto_guard = conn.crypto.lock().await;
+        if let Some(crypto) = crypto_guard.as_ref() {
+            if let Some(sek) = crypto.keys.active_key() {
+                if let Some(kek) = crypto.kek.as_ref() {
+                    if let Ok(wrapped) = key_material::wrap_key(kek, sek) {
+                        let cipher = match crypto.mode {
+                            srt_protocol::crypto::CryptoMode::AesCtr => CipherType::AesCtr,
+                            srt_protocol::crypto::CryptoMode::AesGcm => CipherType::AesGcm,
+                        };
+                        let km_msg = KeyMaterialMessage::new_single(
+                            KeyIndex::Even,
+                            crypto.keys.key_size,
+                            cipher,
+                            crypto.salt,
+                            wrapped,
+                        );
+                        let mut km_buf = BytesMut::new();
+                        km_msg.serialize(&mut km_buf);
+
+                        // Extension header: type=KmReq(3), size in words
+                        let size_words = (km_buf.len() + 3) / 4;
+                        ext_buf.put_u32((3u32 << 16) | size_words as u32);
+                        ext_buf.extend_from_slice(&km_buf);
+                        // Pad to 4-byte boundary
+                        while ext_buf.len() % 4 != 0 {
+                            ext_buf.put_u8(0);
+                        }
+                        ext_flags |= HS_EXT_KMREQ;
+                    }
+                }
+            }
+        }
+    }
+
     let conclusion_hs = Handshake {
         version: HS_VERSION_SRT1,
-        ext_flags: HS_EXT_HSREQ,
+        ext_flags,
         isn: induction_hs.isn,
         mss: conn.config.mss as i32,
         flight_flag_size: conn.config.flight_flag_size as i32,
@@ -143,10 +184,10 @@ pub async fn connect(
     log::debug!("HSv5 caller: sent CONCLUSION to {}", target);
 
     // Wait for CONCLUSION response
-    let conclusion_response = {
+    let (conclusion_response, conclusion_ext_bytes) = {
         let mut rx = conn.handshake_rx.lock().await;
         match tokio::time::timeout(timeout, rx.recv()).await {
-            Ok(Some((hs, _addr))) => hs,
+            Ok(Some((hs, _addr, ext))) => (hs, ext),
             Ok(None) => {
                 log::error!("HSv5 caller: handshake channel closed during CONCLUSION");
                 conn.set_state(ConnectionState::Broken).await;
@@ -172,6 +213,27 @@ pub async fn connect(
         );
         conn.set_state(ConnectionState::Broken).await;
         return Err(SrtError::ConnectionFail);
+    }
+
+    // Parse KMRSP from conclusion extensions (if encryption enabled)
+    if !conclusion_ext_bytes.is_empty() {
+        let extensions = HandshakeExtension::parse_extensions(&conclusion_ext_bytes);
+        for ext in &extensions {
+            if ext.ext_type == 4 {
+                // KmRsp — convert u32 data back to bytes
+                let km_bytes: Vec<u8> = ext.data.iter().flat_map(|w| w.to_be_bytes()).collect();
+                if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes) {
+                    // The listener echoes back the same KM message to confirm key exchange
+                    let mut crypto_guard = conn.crypto.lock().await;
+                    if let Some(crypto) = crypto_guard.as_mut() {
+                        // Use the salt from the response (listener may have its own)
+                        crypto.salt = km_msg.salt;
+                        crypto.km_exchanged = true;
+                        log::debug!("HSv5 caller: KMRSP received, encryption active");
+                    }
+                }
+            }
+        }
     }
 
     // Store peer socket ID and initialize receive buffer with peer's ISN

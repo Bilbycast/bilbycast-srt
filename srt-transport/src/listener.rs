@@ -13,16 +13,22 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use tokio::sync::mpsc;
 
+use srt_protocol::access_control::{
+    AccessControl, AccessControlFn, AcceptAll, HandshakeInfo, SRT_CMD_SID, parse_stream_id,
+};
 use srt_protocol::config::{KeySize, SrtConfig, SRT_VERSION};
 use srt_protocol::config::srt_options::SrtFlags;
-use srt_protocol::error::SrtError;
+use srt_protocol::crypto::KeyIndex;
+use srt_protocol::crypto::km_exchange::{CipherType, KeyMaterialMessage};
+use srt_protocol::crypto::key_material;
+use srt_protocol::error::{RejectReason, SrtError};
 use srt_protocol::protocol::connection::ConnectionState;
 use srt_protocol::protocol::handshake::{
-    HS_EXT_HSREQ, HS_VERSION_SRT1, Handshake, HandshakeType, SrtHsExtension,
-    SRT_MAGIC_CODE,
+    HS_EXT_HSREQ, HS_EXT_KMREQ, HS_VERSION_SRT1, Handshake, HandshakeExtension,
+    HandshakeType, SrtHsExtension, SRT_MAGIC_CODE,
 };
 
 use crate::channel::UdpChannel;
@@ -37,6 +43,7 @@ use crate::socket::SrtSocket;
 pub struct SrtListenerBuilder {
     config: SrtConfig,
     backlog: usize,
+    access_control: Arc<dyn AccessControl>,
 }
 
 impl SrtListenerBuilder {
@@ -45,6 +52,7 @@ impl SrtListenerBuilder {
         Self {
             config: SrtConfig::default(),
             backlog: 5,
+            access_control: Arc::new(AcceptAll),
         }
     }
 
@@ -99,6 +107,55 @@ impl SrtListenerBuilder {
         self
     }
 
+    /// Set the maximum retransmission bandwidth in bytes per second.
+    ///
+    /// Uses a token bucket shaper to limit retransmission bandwidth.
+    /// - `-1` (default): unlimited retransmission bandwidth
+    /// - `0`: disable retransmissions entirely
+    /// - `> 0`: limit to this many bytes per second
+    pub fn max_rexmit_bw(mut self, bw: i64) -> Self {
+        self.config.max_rexmit_bw = bw;
+        self
+    }
+
+    /// Set an access control handler that inspects incoming connections.
+    ///
+    /// The handler receives a [`HandshakeInfo`] with the peer address,
+    /// Stream ID, encryption state, etc. and returns `Ok(())` to accept
+    /// or `Err(RejectReason)` to reject. Rejected connections receive a
+    /// handshake failure response with the given reason code.
+    ///
+    /// By default, all connections are accepted.
+    pub fn access_control(mut self, ac: impl AccessControl) -> Self {
+        self.access_control = Arc::new(ac);
+        self
+    }
+
+    /// Set an access control callback using a closure.
+    ///
+    /// Convenience alternative to [`access_control()`](Self::access_control).
+    ///
+    /// # Example
+    /// ```ignore
+    /// SrtListener::builder()
+    ///     .access_control_fn(|info| {
+    ///         if info.stream_id.starts_with("#!::r=live/") {
+    ///             Ok(())
+    ///         } else {
+    ///             Err(RejectReason::Peer)
+    ///         }
+    ///     })
+    ///     .bind("0.0.0.0:4200".parse().unwrap())
+    ///     .await?;
+    /// ```
+    pub fn access_control_fn<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&HandshakeInfo) -> Result<(), RejectReason> + Send + Sync + 'static,
+    {
+        self.access_control = Arc::new(AccessControlFn(f));
+        self
+    }
+
     /// Bind and start listening.
     pub async fn bind(self, addr: SocketAddr) -> Result<SrtListener, SrtError> {
         let channel = UdpChannel::bind(addr).await
@@ -130,12 +187,14 @@ impl SrtListenerBuilder {
         let mux_accept = mux.clone();
         let config_accept = self.config.clone();
         let listener_conn_accept = listener_conn.clone();
+        let ac = self.access_control.clone();
         tokio::spawn(async move {
             accept_loop(
                 mux_accept,
                 config_accept,
                 listener_conn_accept,
                 accept_tx,
+                ac,
             )
             .await;
         });
@@ -155,6 +214,7 @@ impl Default for SrtListenerBuilder {
         Self::new()
     }
 }
+
 
 /// An SRT listener that accepts incoming connections.
 pub struct SrtListener {
@@ -209,6 +269,7 @@ async fn accept_loop(
     config: SrtConfig,
     listener_conn: Arc<SrtConnection>,
     accept_tx: mpsc::Sender<SrtSocket>,
+    access_control: Arc<dyn AccessControl>,
 ) {
     loop {
         // Check if listener is still active
@@ -222,7 +283,7 @@ async fn accept_loop(
         let (induction_hs, caller_addr) = {
             let mut rx = listener_conn.handshake_rx.lock().await;
             match rx.recv().await {
-                Some(msg) => msg,
+                Some((hs, addr, _ext)) => (hs, addr),
                 None => {
                     log::debug!("Listener handshake channel closed");
                     break;
@@ -281,7 +342,7 @@ async fn accept_loop(
         mux.add_connection(listener_socket_id, listener_conn.clone()).await;
 
         // Wait for CONCLUSION from the caller
-        let (conclusion_hs, conclusion_addr) = {
+        let (conclusion_hs, conclusion_addr, conclusion_ext_bytes) = {
             let mut rx = listener_conn.handshake_rx.lock().await;
             match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
                 Ok(Some(msg)) => msg,
@@ -324,9 +385,91 @@ async fn accept_loop(
             conclusion_addr
         );
 
-        // Create a new connection for the accepted peer
+        // Parse extensions from caller's CONCLUSION (KMREQ, Stream ID)
+        let mut km_response: Option<KeyMaterialMessage> = None;
+        let mut peer_sek: Option<Vec<u8>> = None;
+        let mut peer_salt: Option<[u8; 16]> = None;
+        let mut peer_stream_id = String::new();
+        let mut is_encrypted = false;
+        if !conclusion_ext_bytes.is_empty() {
+            let extensions = HandshakeExtension::parse_extensions(&conclusion_ext_bytes);
+            for ext in &extensions {
+                match ext.ext_type {
+                    3 if config.encryption_enabled() => {
+                        // KmReq — convert u32 data to bytes
+                        let km_bytes: Vec<u8> = ext.data.iter().flat_map(|w| w.to_be_bytes()).collect();
+                        if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes) {
+                            // Derive KEK from our passphrase + caller's salt
+                            let kek = key_material::derive_kek(
+                                &config.passphrase, &km_msg.salt, km_msg.key_size
+                            );
+                            // Unwrap the SEK
+                            if let Ok(sek) = key_material::unwrap_key(&kek, &km_msg.wrapped_keys) {
+                                log::debug!("Listener: KMREQ received, SEK unwrapped successfully");
+                                let cipher = match km_msg.cipher {
+                                    CipherType::AesGcm => CipherType::AesGcm,
+                                    _ => CipherType::AesCtr,
+                                };
+                                if let Ok(wrapped) = key_material::wrap_key(&kek, &sek) {
+                                    km_response = Some(KeyMaterialMessage::new_single(
+                                        KeyIndex::Even, km_msg.key_size, cipher,
+                                        km_msg.salt, wrapped,
+                                    ));
+                                }
+                                peer_sek = Some(sek);
+                                peer_salt = Some(km_msg.salt);
+                                is_encrypted = true;
+                            } else {
+                                log::warn!("Listener: KMREQ key unwrap failed (wrong passphrase?)");
+                            }
+                        }
+                    }
+                    SRT_CMD_SID => {
+                        // Stream ID extension
+                        peer_stream_id = parse_stream_id(&ext.data);
+                        log::debug!("Listener: received Stream ID: {:?}", peer_stream_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Access control check — let the callback decide whether to accept
+        let hs_info = HandshakeInfo {
+            peer_addr: conclusion_addr,
+            stream_id: peer_stream_id.clone(),
+            is_encrypted,
+            peer_socket_id: conclusion_hs.socket_id as u32,
+            peer_version: conclusion_hs.version,
+        };
+        if let Err(reason) = access_control.on_accept(&hs_info) {
+            log::info!(
+                "Listener: rejected connection from {} (stream_id={:?}, reason={:?})",
+                conclusion_addr, peer_stream_id, reason
+            );
+            // Send rejection handshake
+            let rejection = Handshake {
+                version: HS_VERSION_SRT1,
+                ext_flags: 0,
+                isn: 0,
+                mss: config.mss as i32,
+                flight_flag_size: config.flight_flag_size as i32,
+                req_type: HandshakeType::Failure(reason),
+                socket_id: listener_socket_id as i32,
+                cookie: cookie as i32,
+                peer_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            };
+            let pkt = build_handshake_packet(&rejection, conclusion_hs.socket_id as u32);
+            let _ = mux.send_to(&pkt, conclusion_addr).await;
+            mux.remove_connection(listener_socket_id).await;
+            continue;
+        }
+
+        // Create a new connection for the accepted peer, storing the caller's Stream ID
+        let mut conn_config = config.clone();
+        conn_config.stream_id = peer_stream_id;
         let new_conn = Arc::new(SrtConnection::new(
-            config.clone(),
+            conn_config,
             mux.local_addr(),
             listener_socket_id,
         ));
@@ -337,6 +480,18 @@ async fn accept_loop(
         // Our send buffer starts at SeqNo(0) (set in SrtConnection::new).
         // Advertise ISN=0 in CONCLUSION so the peer's receive buffer is aligned.
         let listener_isn: i32 = 0;
+
+        // If caller sent KMREQ, set the shared SEK on this connection's crypto
+        if let (Some(sek), Some(salt)) = (&peer_sek, &peer_salt) {
+            let mut crypto_guard = new_conn.crypto.lock().await;
+            if let Some(crypto) = crypto_guard.as_mut() {
+                crypto.keys.set_key(KeyIndex::Even, sek.clone());
+                crypto.salt = *salt;
+                crypto.km_exchanged = true;
+                log::debug!("Listener: set shared SEK on new connection");
+            }
+        }
+
         new_conn.set_state(ConnectionState::Connected).await;
 
         // Register the new connection in the multiplexer for data routing
@@ -365,9 +520,23 @@ async fn accept_loop(
         ext_buf.extend_from_slice(&((2u32 << 16) | 4u32).to_be_bytes());
         srt_ext.serialize(&mut ext_buf);
 
+        // Add KMRSP extension if we processed a KMREQ
+        let mut resp_ext_flags = HS_EXT_HSREQ;
+        if let Some(km_msg) = &km_response {
+            let mut km_buf = BytesMut::new();
+            km_msg.serialize(&mut km_buf);
+            let size_words = (km_buf.len() + 3) / 4;
+            ext_buf.put_u32((4u32 << 16) | size_words as u32); // type=KmRsp(4)
+            ext_buf.extend_from_slice(&km_buf);
+            while ext_buf.len() % 4 != 0 {
+                ext_buf.put_u8(0);
+            }
+            resp_ext_flags |= HS_EXT_KMREQ;
+        }
+
         let conclusion_response = Handshake {
             version: HS_VERSION_SRT1,
-            ext_flags: HS_EXT_HSREQ, // echo back that we support HSREQ
+            ext_flags: resp_ext_flags,
             isn: listener_isn,
             mss: config.mss as i32,
             flight_flag_size: config.flight_flag_size as i32,

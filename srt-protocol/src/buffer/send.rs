@@ -44,7 +44,8 @@ pub struct SendBufferEntry {
 /// Send buffer for managing outgoing data.
 ///
 /// Maps to C++ `CSndBuffer`. Handles message-to-packet segmentation
-/// and maintains the retransmission queue.
+/// and maintains the retransmission queue. Packets remain in the buffer
+/// until acknowledged — a send cursor tracks the next unsent position.
 pub struct SendBuffer {
     /// Ring buffer of packet entries.
     entries: VecDeque<SendBufferEntry>,
@@ -58,6 +59,9 @@ pub struct SendBuffer {
     next_msg: MsgNo,
     /// First unacknowledged sequence number.
     first_unacked: SeqNo,
+    /// Cursor into entries: index of next packet to send for the first time.
+    /// Packets before this index have already been sent (but remain for retransmission).
+    send_cursor: usize,
 }
 
 impl SendBuffer {
@@ -69,6 +73,7 @@ impl SendBuffer {
             next_seq: initial_seq,
             next_msg: MsgNo::new(1),
             first_unacked: initial_seq,
+            send_cursor: 0,
         }
     }
 
@@ -146,7 +151,37 @@ impl SendBuffer {
         Some(num_packets)
     }
 
-    /// Get a packet by sequence number for sending or retransmission.
+    /// Get the next unsent packet and advance the cursor.
+    /// The packet remains in the buffer for potential retransmission.
+    /// Returns a clone of the entry (with send_count incremented).
+    pub fn next_packet(&mut self) -> Option<SendBufferEntry> {
+        if self.send_cursor >= self.entries.len() {
+            return None;
+        }
+        let entry = &mut self.entries[self.send_cursor];
+        entry.send_count += 1;
+        let result = entry.clone();
+        self.send_cursor += 1;
+        Some(result)
+    }
+
+    /// Whether there are unsent packets ready to send.
+    pub fn has_unsent(&self) -> bool {
+        self.send_cursor < self.entries.len()
+    }
+
+    /// Get a packet by sequence number for retransmission.
+    /// Increments send_count and returns a clone.
+    pub fn get_packet_for_retransmit(&mut self, seq: SeqNo) -> Option<SendBufferEntry> {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.seq_no == seq) {
+            entry.send_count += 1;
+            Some(entry.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Get a mutable reference to a packet by sequence number.
     pub fn get_packet(&mut self, seq: SeqNo) -> Option<&mut SendBufferEntry> {
         self.entries.iter_mut().find(|e| e.seq_no == seq)
     }
@@ -163,6 +198,8 @@ impl SendBuffer {
                 break;
             }
         }
+        // Adjust send_cursor since we removed entries from the front
+        self.send_cursor = self.send_cursor.saturating_sub(removed);
         if ack_seq.is_after(self.first_unacked) {
             self.first_unacked = ack_seq;
         }
@@ -177,12 +214,12 @@ impl SendBuffer {
             .collect()
     }
 
-    /// Number of packets currently in the buffer.
+    /// Number of packets currently in the buffer (sent + unsent, awaiting ACK).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Whether the buffer is empty.
+    /// Whether the buffer has no packets at all.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -202,27 +239,19 @@ impl SendBuffer {
         self.first_unacked
     }
 
-    /// Number of packets in flight (unacknowledged).
+    /// Number of packets in flight (sent but unacknowledged).
     pub fn in_flight(&self) -> usize {
-        self.entries.iter().filter(|e| !e.acked).count()
+        self.entries.iter().filter(|e| !e.acked && e.send_count > 0).count()
     }
 
-    /// Peek at the data of the next unsent packet (front of the buffer).
-    /// Returns the serialized payload data, or None if empty.
+    /// Peek at the data of the next unsent packet.
+    /// Returns the serialized payload data, or None if no unsent packets.
     pub fn peek_next_data(&self) -> Option<Vec<u8>> {
-        self.entries.front().map(|e| e.data.to_vec())
-    }
-
-    /// Take the next unsent entry from the front of the buffer.
-    ///
-    /// Removes and returns the front entry, incrementing its send_count.
-    /// Unlike `peek_next_data`, this actually dequeues the entry so it
-    /// won't be sent again (unless re-inserted for retransmission).
-    pub fn take_next_entry(&mut self) -> Option<SendBufferEntry> {
-        self.entries.pop_front().map(|mut e| {
-            e.send_count += 1;
-            e
-        })
+        if self.send_cursor < self.entries.len() {
+            Some(self.entries[self.send_cursor].data.to_vec())
+        } else {
+            None
+        }
     }
 
     /// Drop messages that have expired (TTL exceeded).
@@ -230,6 +259,16 @@ impl SendBuffer {
     pub fn drop_expired(&mut self) -> usize {
         let now = Instant::now();
         let before = self.entries.len();
+
+        // Count how many entries before send_cursor will be removed
+        let cursor_adjust: usize = self.entries.iter().take(self.send_cursor).filter(|e| {
+            if e.msg_ttl < 0 {
+                return false; // kept, no adjustment
+            }
+            let elapsed = now.duration_since(e.origin_time);
+            elapsed.as_millis() > e.msg_ttl as u128
+        }).count();
+
         self.entries.retain(|e| {
             if e.msg_ttl < 0 {
                 return true; // No TTL
@@ -237,6 +276,61 @@ impl SendBuffer {
             let elapsed = now.duration_since(e.origin_time);
             elapsed.as_millis() <= e.msg_ttl as u128
         });
+
+        self.send_cursor = self.send_cursor.saturating_sub(cursor_adjust);
         before - self.entries.len()
+    }
+
+    /// Drop expired messages and return info for DropReq packets.
+    /// Each returned tuple is (msg_no as i32, first_seq, last_seq).
+    pub fn drop_expired_with_info(&mut self) -> Vec<(i32, SeqNo, SeqNo)> {
+        let now = Instant::now();
+        let mut dropped_msgs: Vec<(i32, SeqNo, SeqNo)> = Vec::new();
+
+        // Identify expired entries and group by message number
+        let mut expired_seqs: Vec<(MsgNo, SeqNo)> = Vec::new();
+        for e in &self.entries {
+            if e.msg_ttl >= 0 {
+                let elapsed = now.duration_since(e.origin_time);
+                if elapsed.as_millis() > e.msg_ttl as u128 {
+                    expired_seqs.push((e.msg_no, e.seq_no));
+                }
+            }
+        }
+
+        // Group by message number to build DropReq ranges
+        if !expired_seqs.is_empty() {
+            let mut current_msg = expired_seqs[0].0;
+            let mut first_seq = expired_seqs[0].1;
+            let mut last_seq = expired_seqs[0].1;
+
+            for &(msg, seq) in &expired_seqs[1..] {
+                if msg == current_msg {
+                    last_seq = seq;
+                } else {
+                    dropped_msgs.push((current_msg.value() as i32, first_seq, last_seq));
+                    current_msg = msg;
+                    first_seq = seq;
+                    last_seq = seq;
+                }
+            }
+            dropped_msgs.push((current_msg.value() as i32, first_seq, last_seq));
+        }
+
+        // Now actually remove them
+        if !expired_seqs.is_empty() {
+            let cursor_adjust: usize = self.entries.iter().take(self.send_cursor).filter(|e| {
+                if e.msg_ttl < 0 { return false; }
+                now.duration_since(e.origin_time).as_millis() > e.msg_ttl as u128
+            }).count();
+
+            self.entries.retain(|e| {
+                if e.msg_ttl < 0 { return true; }
+                now.duration_since(e.origin_time).as_millis() <= e.msg_ttl as u128
+            });
+            self.send_cursor = self.send_cursor.saturating_sub(cursor_adjust);
+        }
+
+        dropped_msgs
     }
 }

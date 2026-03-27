@@ -28,6 +28,7 @@
 //! - `encryption` (default) - Enables AES-CTR/GCM encryption support via RustCrypto crates.
 //!   Disable with `default-features = false` for a smaller binary without crypto.
 
+pub mod access_control;
 pub mod config;
 pub mod error;
 pub mod packet;

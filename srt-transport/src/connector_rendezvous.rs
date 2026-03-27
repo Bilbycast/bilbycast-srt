@@ -104,7 +104,7 @@ pub async fn connect_rendezvous(
                 }
                 result = rx.recv() => {
                     match result {
-                        Some((hs, _addr)) => {
+                        Some((hs, _addr, _ext)) => {
                             match hs.req_type {
                                 HandshakeType::Waveahand => {
                                     log::debug!(
@@ -235,7 +235,7 @@ pub async fn connect_rendezvous(
                 }
                 result = rx.recv() => {
                     match result {
-                        Some((hs, _addr)) => {
+                        Some((hs, _addr, _ext)) => {
                             match hs.req_type {
                                 HandshakeType::Conclusion => {
                                     log::debug!("HSv5 rendezvous: received CONCLUSION from peer");
