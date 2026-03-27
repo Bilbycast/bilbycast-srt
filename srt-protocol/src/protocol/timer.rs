@@ -96,6 +96,8 @@ pub struct SrtTimers {
     pub srtt: i32,
     /// RTT variance (microseconds).
     pub rttvar: i32,
+    /// Instant when the connection was established (for uptime tracking).
+    pub connection_start: Instant,
 }
 
 impl SrtTimers {
@@ -108,6 +110,7 @@ impl SrtTimers {
             last_response: Instant::now(),
             srtt: INITIAL_RTT_US,
             rttvar: INITIAL_RTTVAR_US,
+            connection_start: Instant::now(),
         }
     }
 

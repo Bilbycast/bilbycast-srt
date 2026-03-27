@@ -138,6 +138,13 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
         }
     }
 
+    // Update stats with current RTT and uptime from timers
+    {
+        let mut stats = conn.stats.lock().await;
+        stats.ms_rtt = timers.srtt as f64 / 1000.0; // srtt is in microseconds, convert to ms
+        stats.ms_timestamp = timers.connection_start.elapsed().as_millis() as i64;
+    }
+
     // Check ACK timer — send periodic ACK to peer so it knows we received data.
     // Without ACKs the sender's congestion control won't open the send window,
     // which breaks interop with the C++ SRT library.
