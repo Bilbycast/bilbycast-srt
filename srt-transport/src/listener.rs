@@ -224,6 +224,18 @@ impl SrtListenerBuilder {
         self
     }
 
+    /// Enable or disable too-late packet drop in live mode.
+    pub fn tlpkt_drop(mut self, enabled: bool) -> Self {
+        self.config.tlpkt_drop = enabled;
+        self
+    }
+
+    /// Set the IP Time To Live (1-255, default: 64).
+    pub fn ip_ttl(mut self, ttl: i32) -> Self {
+        self.config.ip_ttl = ttl;
+        self
+    }
+
     /// Set the connection timeout.
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.config.connect_timeout = timeout;

@@ -231,6 +231,20 @@ impl SrtSocketBuilder {
         self
     }
 
+    /// Enable or disable too-late packet drop in live mode.
+    /// When enabled (default for live mode), packets that arrive after their
+    /// TSBPD delivery deadline are dropped. Disable for recording/archival.
+    pub fn tlpkt_drop(mut self, enabled: bool) -> Self {
+        self.config.tlpkt_drop = enabled;
+        self
+    }
+
+    /// Set the IP Time To Live (1-255, default: 64).
+    pub fn ip_ttl(mut self, ttl: i32) -> Self {
+        self.config.ip_ttl = ttl;
+        self
+    }
+
     /// Enable or disable rendezvous mode.
     /// In rendezvous mode, both peers simultaneously connect to each other
     /// (no caller/listener distinction). Use `connect_rendezvous()` to connect.
