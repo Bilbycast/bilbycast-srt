@@ -10,7 +10,7 @@
 //! transport-level resources (channel, addresses).
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, mpsc, watch};
 
@@ -21,7 +21,10 @@ use srt_protocol::config::{SrtConfig, SocketStatus};
 use srt_protocol::congestion::CongestionControl;
 use srt_protocol::congestion::live::LiveCC;
 use srt_protocol::congestion::token_bucket::TokenBucket;
-use srt_protocol::crypto::{CryptoControl, CryptoMode};
+use srt_protocol::crypto::CryptoControl;
+use srt_protocol::fec::{ArqMode, FecConfig};
+use srt_protocol::fec::decoder::FecDecoder;
+use srt_protocol::fec::encoder::FecEncoder;
 use srt_protocol::packet::seq::SeqNo;
 use srt_protocol::protocol::ack::AckState;
 use srt_protocol::protocol::connection::ConnectionState;
@@ -35,6 +38,9 @@ use srt_protocol::window::{AckWindow, PktTimeWindow};
 pub struct SrtConnection {
     /// Connection configuration.
     pub config: SrtConfig,
+    /// Connection start time — used as the epoch for SRT packet timestamps.
+    /// SRT timestamps are relative to connection start (like C++ SRT's m_StartTime).
+    pub start_time: Instant,
     /// Current connection state.
     pub state: Mutex<ConnectionState>,
     /// Local socket address.
@@ -75,6 +81,16 @@ pub struct SrtConnection {
     pub crypto: Mutex<Option<CryptoControl>>,
     /// Token bucket shaper for retransmission bandwidth control (SRTO_MAXREXMITBW).
     pub rexmit_shaper: Mutex<TokenBucket>,
+    /// FEC encoder state (sender side). None if FEC not negotiated.
+    pub fec_encoder: Mutex<Option<FecEncoder>>,
+    /// FEC decoder state (receiver side). None if FEC not negotiated.
+    pub fec_decoder: Mutex<Option<FecDecoder>>,
+    /// Negotiated FEC ARQ mode. Always by default (normal ARQ).
+    pub fec_arq_mode: Mutex<ArqMode>,
+    /// Sequence numbers that FEC reported as uncoverable (for ARQ OnReq mode).
+    pub fec_uncoverable: Mutex<Vec<SeqNo>>,
+    /// Whether TSBPD base_time has been calibrated from the first data packet.
+    pub tsbpd_calibrated: Mutex<bool>,
 
     /// Notify when data is available to read.
     pub recv_data_ready: Notify,
@@ -112,7 +128,7 @@ impl SrtConnection {
             let kek = key_material::derive_kek(&config.passphrase, &salt, config.key_size);
             let sek = key_material::generate_sek(config.key_size);
 
-            let mut cc = CryptoControl::new(config.key_size, CryptoMode::AesCtr);
+            let mut cc = CryptoControl::new(config.key_size, config.crypto_mode.into());
             cc.kek = Some(kek);
             cc.salt = salt;
             cc.keys.set_key(srt_protocol::crypto::KeyIndex::Even, sek);
@@ -123,6 +139,7 @@ impl SrtConnection {
 
         Self {
             config,
+            start_time: Instant::now(),
             state: Mutex::new(ConnectionState::Init),
             local_addr,
             peer_addr: Mutex::new(None),
@@ -143,6 +160,11 @@ impl SrtConnection {
             pkt_time_window: Mutex::new(PktTimeWindow::new()),
             crypto: Mutex::new(crypto),
             rexmit_shaper: Mutex::new(TokenBucket::new(max_rexmit_bw, mss)),
+            fec_encoder: Mutex::new(None),
+            fec_decoder: Mutex::new(None),
+            fec_arq_mode: Mutex::new(ArqMode::Always),
+            fec_uncoverable: Mutex::new(Vec::new()),
+            tsbpd_calibrated: Mutex::new(false),
             recv_data_ready: Notify::new(),
             send_space_ready: Notify::new(),
             state_watch: state_tx,
@@ -182,6 +204,15 @@ impl SrtConnection {
         *self.ack_state.lock().await = AckState::new(isn);
         *self.highest_recv_seq.lock().await = isn;
         self.recv_loss_list.lock().await.clear();
+    }
+
+    /// Initialize FEC encoder and decoder from a negotiated config.
+    /// Called after handshake completes if FEC was negotiated.
+    pub async fn init_fec(&self, config: FecConfig) {
+        *self.fec_arq_mode.lock().await = config.arq;
+        *self.fec_encoder.lock().await = Some(FecEncoder::new(config.clone()));
+        let base_seq = *self.highest_recv_seq.lock().await;
+        *self.fec_decoder.lock().await = Some(FecDecoder::new(config, base_seq));
     }
 
     /// Set our own ISN on the send buffer. Used by the listener to align the

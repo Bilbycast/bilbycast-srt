@@ -12,7 +12,7 @@
 
 use crate::packet::seq::SeqNo;
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Send-side loss list.
 ///
@@ -105,9 +105,9 @@ pub struct ReceiveLossList {
     losses: BTreeMap<i32, LossEntry>,
 }
 
-#[allow(dead_code)]
 struct LossEntry {
     /// When the loss was first detected.
+    #[allow(dead_code)]
     detected: Instant,
     /// When the last NAK was sent for this loss.
     last_nak: Instant,
@@ -154,14 +154,47 @@ impl ReceiveLossList {
         }
     }
 
-    /// Get all loss ranges for NAK reporting.
-    pub fn get_loss_ranges(&self) -> Vec<(SeqNo, SeqNo)> {
+    /// Get loss ranges for NAK reporting, suppressing recently-NAK'd losses.
+    ///
+    /// Only includes losses whose last NAK was sent more than
+    /// `min_nak_interval` ago (or that have never been NAK'd). This
+    /// prevents the receiver from flooding the sender with redundant NAKs
+    /// for the same packet losses every timer cycle.
+    ///
+    /// Updates `last_nak` and `nak_count` for all returned entries.
+    pub fn get_loss_ranges(&mut self, min_nak_interval: Duration) -> Vec<(SeqNo, SeqNo)> {
         if self.losses.is_empty() {
             return Vec::new();
         }
 
+        let now = Instant::now();
+
+        // Collect sequence numbers eligible for NAK (not recently NAK'd)
+        let eligible: Vec<i32> = self
+            .losses
+            .iter()
+            .filter(|(_, entry)| {
+                // Include if never NAK'd (nak_count == 0) or enough time has passed
+                entry.nak_count == 0 || now.duration_since(entry.last_nak) >= min_nak_interval
+            })
+            .map(|(&seq, _)| seq)
+            .collect();
+
+        if eligible.is_empty() {
+            return Vec::new();
+        }
+
+        // Mark all eligible entries as NAK'd
+        for &seq in &eligible {
+            if let Some(entry) = self.losses.get_mut(&seq) {
+                entry.last_nak = now;
+                entry.nak_count += 1;
+            }
+        }
+
+        // Coalesce into contiguous ranges
         let mut ranges = Vec::new();
-        let mut iter = self.losses.keys().copied();
+        let mut iter = eligible.iter().copied();
         if let Some(first) = iter.next() {
             let mut range_start = SeqNo::new(first);
             let mut range_end = range_start;
@@ -199,5 +232,99 @@ impl ReceiveLossList {
 impl Default for ReceiveLossList {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fresh_losses_always_eligible() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(14));
+
+        // First call: all 5 losses should be eligible (nak_count == 0)
+        let ranges = list.get_loss_ranges(Duration::from_secs(999));
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (SeqNo::new(10), SeqNo::new(14)));
+    }
+
+    #[test]
+    fn test_suppression_within_interval() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(12));
+
+        // First NAK: eligible
+        let ranges = list.get_loss_ranges(Duration::from_secs(10));
+        assert_eq!(ranges.len(), 1);
+
+        // Immediately after: suppressed (nak_count > 0, interval not elapsed)
+        let ranges = list.get_loss_ranges(Duration::from_secs(10));
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn test_re_eligible_after_interval() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(10));
+
+        // First NAK
+        let ranges = list.get_loss_ranges(Duration::from_millis(1));
+        assert_eq!(ranges.len(), 1);
+
+        // Wait longer than suppression interval
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Should be eligible again
+        let ranges = list.get_loss_ranges(Duration::from_millis(1));
+        assert_eq!(ranges.len(), 1);
+    }
+
+    #[test]
+    fn test_removed_losses_not_reported() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(14));
+
+        // Remove one entry
+        list.remove(SeqNo::new(12));
+        assert_eq!(list.len(), 4);
+
+        let ranges = list.get_loss_ranges(Duration::from_secs(0));
+        // Should get two ranges: 10-11 and 13-14
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0], (SeqNo::new(10), SeqNo::new(11)));
+        assert_eq!(ranges[1], (SeqNo::new(13), SeqNo::new(14)));
+    }
+
+    #[test]
+    fn test_acknowledge_clears_old_entries() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(20));
+
+        list.acknowledge(SeqNo::new(15));
+        // Entries 10-14 should be removed
+        assert_eq!(list.len(), 6); // 15-20
+
+        let ranges = list.get_loss_ranges(Duration::from_secs(0));
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (SeqNo::new(15), SeqNo::new(20)));
+    }
+
+    #[test]
+    fn test_insert_preserves_existing_entries() {
+        let mut list = ReceiveLossList::new();
+        list.insert_range(SeqNo::new(10), SeqNo::new(12));
+
+        // NAK them (sets nak_count=1)
+        let _ = list.get_loss_ranges(Duration::from_secs(0));
+
+        // Re-insert overlapping range — existing entries should keep nak_count=1
+        list.insert_range(SeqNo::new(11), SeqNo::new(14));
+
+        // With a very long suppression, only the NEW entries (13-14) should be eligible
+        let ranges = list.get_loss_ranges(Duration::from_secs(999));
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (SeqNo::new(13), SeqNo::new(14)));
     }
 }

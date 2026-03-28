@@ -53,6 +53,11 @@ pub trait CongestionControl: Send {
     /// Update the maximum send bandwidth.
     fn set_max_bandwidth(&mut self, max_bw_bytes_per_sec: i64);
 
+    /// Get the estimated link bandwidth in packets/sec.
+    fn bandwidth(&self) -> i32 {
+        0
+    }
+
     /// Get the retransmission mode.
     fn rexmit_method(&self) -> RexmitMethod {
         RexmitMethod::LateRexmit

@@ -70,6 +70,11 @@ impl TsbpdTime {
         self.enabled
     }
 
+    /// Get the configured TSBPD delay.
+    pub fn delay(&self) -> Duration {
+        self.delay
+    }
+
     /// Convert a sender timestamp to a local delivery time.
     ///
     /// delivery_time = base_time + sender_timestamp + delay + drift_correction

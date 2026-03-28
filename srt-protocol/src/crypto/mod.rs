@@ -32,7 +32,7 @@ pub mod aes_gcm;
 pub mod key_material;
 pub mod km_exchange;
 
-use crate::config::KeySize;
+use crate::config::{CryptoModeConfig, KeySize};
 use crate::packet::header::EncryptionKeySpec;
 
 /// Crypto key index (even or odd).
@@ -73,6 +73,15 @@ pub enum CryptoMode {
     AesCtr,
     /// AES Galois/Counter mode (authenticated encryption).
     AesGcm,
+}
+
+impl From<CryptoModeConfig> for CryptoMode {
+    fn from(config: CryptoModeConfig) -> Self {
+        match config {
+            CryptoModeConfig::AesCtr => CryptoMode::AesCtr,
+            CryptoModeConfig::AesGcm => CryptoMode::AesGcm,
+        }
+    }
 }
 
 /// Stream Encrypting Key (SEK) pair.

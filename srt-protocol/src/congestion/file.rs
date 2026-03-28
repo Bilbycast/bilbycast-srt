@@ -122,6 +122,10 @@ impl CongestionControl for FileCC {
         self.max_bw = max_bw_bytes_per_sec;
     }
 
+    fn bandwidth(&self) -> i32 {
+        self.bandwidth
+    }
+
     fn rexmit_method(&self) -> RexmitMethod {
         RexmitMethod::FastRexmit
     }

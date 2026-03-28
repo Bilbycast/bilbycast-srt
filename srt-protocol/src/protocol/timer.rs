@@ -27,7 +27,10 @@ pub const INITIAL_RTT_US: i32 = 100_000;
 pub const INITIAL_RTTVAR_US: i32 = 50_000;
 
 /// Maximum expiration counter before connection timeout.
-pub const COMM_RESPONSE_MAX_EXP: u32 = 16;
+/// With base interval ~300ms and exponential backoff, exp_count=5
+/// triggers at ~10s of no peer response. Previously 16 (hundreds of seconds),
+/// which caused stale listener connections to block reconnection.
+pub const COMM_RESPONSE_MAX_EXP: u32 = 5;
 
 /// Minimum TSBPD threshold for packet drop (1000ms).
 pub const SRT_TLPKTDROP_MINTHRESHOLD_MS: u32 = 1000;
@@ -133,6 +136,21 @@ impl SrtTimers {
     pub fn nak_interval(&self) -> Duration {
         let interval_us = (self.srtt + 4 * self.rttvar).max(20_000) as u64;
         Duration::from_micros(interval_us)
+    }
+
+    /// Per-loss NAK suppression interval.
+    ///
+    /// Controls how frequently an individual loss entry can be re-NAK'd.
+    /// Set to 1x the NAK interval so that:
+    /// - First NAK for a new loss is always sent immediately (nak_count==0)
+    /// - Re-NAK after one NAK interval if loss persists (~200ms at 100ms RTT)
+    /// - Reordered packets (jitter) have time to arrive before re-NAK
+    ///
+    /// Previously 4x (800ms) — too long, exceeded TSBPD window.
+    /// Briefly 0 — caused excessive re-NAKs for reordered packets,
+    /// triggering traffic amplification that overwhelmed downstream links.
+    pub fn nak_suppression_interval(&self) -> Duration {
+        self.nak_interval()
     }
 
     /// Compute the EXP (expiration/timeout) interval.

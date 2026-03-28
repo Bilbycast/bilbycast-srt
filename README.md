@@ -5,9 +5,13 @@ A complete, pure-Rust implementation of the [SRT (Secure Reliable Transport)](ht
 ## Features
 
 - **Pure Rust** - No C/C++ dependencies, no system library linking
-- **Full SRT Protocol** - Wire-compatible with the original C++ SRT library
+- **Full SRT Protocol** - Wire-compatible with libsrt v1.5.5
 - **Async I/O** - Built on [tokio](https://tokio.rs/) for high-performance async networking
-- **Encryption** - AES-128/192/256 in CTR and GCM modes using [RustCrypto](https://github.com/RustCrypto) crates
+- **Encryption** - AES-128/192/256 in CTR and GCM modes using [RustCrypto](https://github.com/RustCrypto) crates, enforced encryption, configurable key rotation (`km_refresh_rate`, `km_pre_announce`)
+- **FEC** - Forward Error Correction with row-only and staircase/2D layouts, configurable ARQ integration (`always`/`onreq`/`never`), XOR-based packet recovery
+- **Stream ID & Access Control** - Send/receive Stream ID during handshake, structured `#!::key=value` format parsing, listener accept/reject callbacks with 18 rejection reason codes
+- **Full Configuration** - 50+ socket options: bandwidth control (`max_bw`, `input_bw`, `overhead_bw`, `max_rexmit_bw`), buffer tuning (`flight_flag_size`, `send/recv_buffer_size`), encryption tuning (`enforced_encryption`, `km_refresh_rate`), protocol tuning (`retransmit_algo`, `loss_max_ttl`, `send_drop_delay`, `payload_size`, `ip_tos`)
+- **Statistics** - 80+ performance counters: rates, RTT, bandwidth, ACK/NAK, flow control, buffer state, TSBPD delays, FEC recovery/loss, reorder metrics
 - **Feature-gated crypto** - Encryption can be disabled at compile time for smaller binaries
 - **C FFI** - Optional C-compatible API matching the original `srt.h` interface
 - **Cross-platform** - Runs on Linux, macOS, Windows, and any platform Rust supports
@@ -173,6 +177,69 @@ let mut listener = SrtListener::builder()
 let socket = SrtSocket::builder()
     .latency(Duration::from_millis(120))
     .encryption("my_secret_passphrase", KeySize::AES256)
+    .connect("127.0.0.1:4200".parse()?)
+    .await?;
+```
+
+### With Stream ID and Access Control
+
+Stream ID identifies the caller's intent to the listener, enabling multi-stream serving on a single port. Compatible with the libsrt v1.5.5 `SRTO_STREAMID` socket option and SRT Access Control specification.
+
+```rust
+use srt_transport::{SrtListener, SrtSocket};
+use srt_protocol::config::KeySize;
+use std::time::Duration;
+
+// Listener with access control — only accept callers requesting "live/cam1"
+let mut listener = SrtListener::builder()
+    .latency(Duration::from_millis(120))
+    .access_control_fn(|info| {
+        if info.stream_id == "#!::r=live/cam1,m=publish" {
+            Ok(())
+        } else {
+            Err(srt_protocol::error::RejectReason::Peer)
+        }
+    })
+    .bind("127.0.0.1:4200".parse()?)
+    .await?;
+
+// Caller sends Stream ID during handshake
+let socket = SrtSocket::builder()
+    .latency(Duration::from_millis(120))
+    .stream_id("#!::r=live/cam1,m=publish".to_string())
+    .connect("127.0.0.1:4200".parse()?)
+    .await?;
+
+// After connection, read the Stream ID on the accepted socket
+let accepted = listener.accept().await?;
+assert_eq!(accepted.stream_id(), "#!::r=live/cam1,m=publish");
+```
+
+The structured `#!::key=value,...` format supports standard keys: `r` (resource), `m` (mode: request/publish/bidirectional), `s` (session ID), `t` (type: stream/file/auth), `u` (username), `h` (hostname). Parse with `StreamIdInfo::parse()`:
+
+```rust
+use srt_protocol::access_control::StreamIdInfo;
+
+let info = StreamIdInfo::parse("#!::r=live/cam1,m=publish,u=admin");
+assert_eq!(info.resource.as_deref(), Some("live/cam1"));
+assert_eq!(info.mode.as_deref(), Some("publish"));
+assert_eq!(info.user_name.as_deref(), Some("admin"));
+```
+
+### With asymmetric latency
+
+Set different receiver and sender latencies when the link is asymmetric:
+
+```rust
+use srt_transport::SrtSocket;
+use std::time::Duration;
+
+let socket = SrtSocket::builder()
+    .latency(Duration::from_millis(120))           // default for both sides
+    .receiver_latency(Duration::from_millis(200))   // receiver buffers 200ms
+    .sender_latency(Duration::from_millis(100))     // sender requests 100ms minimum
+    .max_rexmit_bw(1_000_000)                       // cap retransmissions at 1 MB/s
+    .live_mode()
     .connect("127.0.0.1:4200".parse()?)
     .await?;
 ```

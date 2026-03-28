@@ -191,7 +191,7 @@ impl SendBuffer {
     pub fn acknowledge(&mut self, ack_seq: SeqNo) -> usize {
         let mut removed = 0;
         while let Some(front) = self.entries.front() {
-            if front.seq_no.is_before(ack_seq) || front.seq_no == ack_seq {
+            if front.seq_no.is_before(ack_seq) {
                 self.entries.pop_front();
                 removed += 1;
             } else {
@@ -227,6 +227,11 @@ impl SendBuffer {
     /// Whether the buffer is full.
     pub fn is_full(&self) -> bool {
         self.entries.len() >= self.max_packets
+    }
+
+    /// Maximum buffer capacity in packets.
+    pub fn max_packets(&self) -> usize {
+        self.max_packets
     }
 
     /// Next sequence number that will be assigned.

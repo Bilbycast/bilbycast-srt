@@ -16,6 +16,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 
 use srt_protocol::crypto::{CryptoControl, CryptoMode};
+use srt_protocol::fec::ArqMode;
 use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::{AckData, ControlType, DropReqData, LossReport};
 use srt_protocol::packet::header::{EncryptionKeySpec, HEADER_SIZE};
@@ -78,13 +79,21 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
                 };
 
                 if let Some(entry) = entry {
-                    let timestamp = entry.origin_time.elapsed().as_micros() as u32;
+                    // SRT timestamp = time since connection start when data was queued.
+                    // This must be monotonically increasing (like C++ SRT's m_StartTime).
+                    // Using origin_time.elapsed() gives ~0 for live streams (data sent
+                    // immediately after queuing), which breaks TSBPD on the receiver.
+                    let timestamp = entry.origin_time
+                        .saturating_duration_since(conn.start_time)
+                        .as_micros() as u32;
 
                     // Encrypt payload if crypto is configured
                     let (payload, enc_key) = encrypt_payload(
                         &conn.crypto, entry.data, entry.seq_no.value() as u32
                     ).await;
 
+                    // Clone payload before moving into packet (needed for FEC encoder)
+                    let payload_for_fec = payload.clone();
                     let pkt = SrtPacket::new_data(
                         entry.seq_no,
                         entry.msg_no,
@@ -110,11 +119,43 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
                         stats.pkt_sent_total += 1;
                         stats.byte_sent_total += pkt.payload_len() as u64;
                     }
+
+                    // Feed to FEC encoder — inject FEC packets if a group completes
+                    {
+                        let mut fec_enc = conn.fec_encoder.lock().await;
+                        if let Some(encoder) = fec_enc.as_mut() {
+                            let fec_packets = encoder.on_data_packet(
+                                entry.seq_no,
+                                timestamp,
+                                enc_key as u8,
+                                &payload_for_fec,
+                            );
+                            for fec_pkt in fec_packets {
+                                let fec_srt = SrtPacket::new_fec_data(
+                                    fec_pkt.seq_no,
+                                    fec_pkt.timestamp,
+                                    dest_socket_id,
+                                    fec_pkt.payload,
+                                );
+                                let mut fec_buf = BytesMut::with_capacity(fec_srt.wire_size());
+                                fec_srt.serialize(&mut fec_buf);
+                                if let Err(e) = mux.send_to(&fec_buf, peer_addr).await {
+                                    log::error!("FEC send error: {}", e);
+                                } else {
+                                    let mut stats = conn.stats.lock().await;
+                                    stats.pkt_snd_filter_extra += 1;
+                                    stats.pkt_snd_filter_extra_total += 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
-            // Pace sending
-            if send_period_us > 0.0 {
+            // Pace sending — but skip the sleep if the loss list still has
+            // pending retransmissions so we drain them as fast as possible.
+            let still_has_losses = !conn.send_loss_list.lock().await.is_empty();
+            if !still_has_losses && send_period_us > 0.0 {
                 tokio::time::sleep(Duration::from_micros(send_period_us as u64)).await;
             }
 
@@ -147,17 +188,17 @@ pub async fn run(mux: Arc<Multiplexer>, conn: Arc<SrtConnection>) {
 /// cannot be sent due to the rate limit are pushed back to the loss
 /// list for the next cycle.
 async fn send_retransmissions(mux: &Multiplexer, conn: &SrtConnection) -> bool {
-    // Collect sequence numbers to retransmit (drain up to a batch)
+    // Drain the entire loss list for retransmission. Rate-limiting is
+    // handled by the token bucket shaper below — there is no need for
+    // an additional batch cap. A small cap (previously 16) caused the
+    // sender to fall hopelessly behind under even moderate packet loss,
+    // because losses expired from the send buffer before they could be
+    // retransmitted.
     let mut seqs_to_retransmit: Vec<SeqNo> = Vec::new();
     {
         let mut loss_list = conn.send_loss_list.lock().await;
-        // Retransmit up to 16 packets per cycle to avoid starving new data
-        for _ in 0..16 {
-            if let Some(seq) = loss_list.pop_front() {
-                seqs_to_retransmit.push(seq);
-            } else {
-                break;
-            }
+        while let Some(seq) = loss_list.pop_front() {
+            seqs_to_retransmit.push(seq);
         }
     }
 
@@ -191,7 +232,12 @@ async fn send_retransmissions(mux: &Multiplexer, conn: &SrtConnection) -> bool {
                 continue;
             }
 
-            let timestamp = entry.origin_time.elapsed().as_micros() as u32;
+            // Retransmissions use the same timestamp as the original send:
+            // time since connection start when data was queued. This ensures
+            // the receiver's TSBPD schedules delivery at the correct time.
+            let timestamp = entry.origin_time
+                .saturating_duration_since(conn.start_time)
+                .as_micros() as u32;
 
             // Encrypt payload if crypto is configured
             let (payload, enc_key) = encrypt_payload(
@@ -262,11 +308,56 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
         }
     }
 
-    // Update stats with current RTT and uptime from timers
+    // Update stats with current RTT, uptime, and snapshot fields
     {
+        let cc = conn.cc.lock().await;
+        let send_buf = conn.send_buf.lock().await;
+        let recv_buf = conn.recv_buf.lock().await;
+        let tsbpd = conn.tsbpd.lock().await;
+        let peer_flow_window = *conn.peer_flow_window.lock().await;
+
+        let max_payload = conn.config.max_payload_size().max(1);
+
         let mut stats = conn.stats.lock().await;
         stats.ms_rtt = timers.srtt as f64 / 1000.0; // srtt is in microseconds, convert to ms
         stats.ms_timestamp = timers.connection_start.elapsed().as_millis() as i64;
+
+        // Instant snapshot fields
+        stats.us_pkt_snd_period = cc.pkt_send_period_us();
+        stats.pkt_flow_window = peer_flow_window as i32;
+        stats.pkt_congestion_window = cc.congestion_window() as i32;
+        stats.pkt_flight_size = send_buf.in_flight() as i32;
+
+        // Bandwidth estimate from CC (packets/sec -> Mbps)
+        let bw_pkts = cc.bandwidth();
+        if bw_pkts > 0 {
+            stats.mbps_bandwidth = bw_pkts as f64 * max_payload as f64 * 8.0 / 1_000_000.0;
+        }
+
+        // Rate fields: compute from total bytes and elapsed time
+        let elapsed_secs = timers.connection_start.elapsed().as_secs_f64();
+        if elapsed_secs > 0.0 {
+            stats.mbps_send_rate = stats.byte_sent_total as f64 * 8.0 / (elapsed_secs * 1_000_000.0);
+            stats.mbps_recv_rate = stats.byte_recv_total as f64 * 8.0 / (elapsed_secs * 1_000_000.0);
+        }
+
+        // Buffer availability
+        stats.byte_avail_snd_buf = ((send_buf.max_packets() - send_buf.len()) * max_payload) as i32;
+        stats.byte_avail_rcv_buf = (recv_buf.available() * max_payload) as i32;
+
+        // Buffer occupancy
+        stats.pkt_snd_buf = send_buf.len() as i32;
+        stats.byte_snd_buf = (send_buf.len() * max_payload) as i32;
+        stats.pkt_rcv_buf = recv_buf.len() as i32;
+        stats.byte_rcv_buf = (recv_buf.len() * max_payload) as i32;
+
+        // TSBPD delay
+        stats.ms_rcv_tsbpd_delay = tsbpd.delay().as_millis() as i32;
+        stats.ms_snd_tsbpd_delay = conn.config.peer_latency as i32;
+
+        // Config-derived
+        stats.mbps_max_bw = conn.config.max_bw as f64 * 8.0 / 1_000_000.0;
+        stats.byte_mss = conn.config.mss as i32;
     }
 
     // Check ACK timer — send periodic ACK to peer so it knows we received data.
@@ -323,8 +414,13 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
     }
 
     // Check NAK timer — send loss reports to the peer
-    if timers.nak.check() {
-        let loss_ranges = conn.recv_loss_list.lock().await.get_loss_ranges();
+    // Respect FEC ARQ mode: Never = suppress all NAKs, OnReq = only uncoverable losses
+    let arq_mode = *conn.fec_arq_mode.lock().await;
+    let should_send_nak = !matches!(arq_mode, ArqMode::Never);
+
+    if should_send_nak && timers.nak.check() {
+        let suppression_interval = timers.nak_suppression_interval();
+        let loss_ranges = conn.recv_loss_list.lock().await.get_loss_ranges(suppression_interval);
         if !loss_ranges.is_empty() {
             if let Some(peer_addr) = *conn.peer_addr.lock().await {
                 let dest_socket_id = *conn.peer_socket_id.lock().await;
@@ -381,9 +477,12 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
                     let _ = mux.send_to(&buf, peer_addr).await;
                 }
             }
+            let drop_bytes = total_dropped as u64 * conn.config.max_payload_size() as u64;
             let mut stats = conn.stats.lock().await;
             stats.pkt_snd_drop += total_dropped as i32;
             stats.pkt_snd_drop_total += total_dropped as i32;
+            stats.byte_snd_drop += drop_bytes;
+            stats.byte_snd_drop_total += drop_bytes;
             log::trace!("Sender dropped {} expired messages, sent DropReq", total_dropped);
         }
     }
@@ -397,9 +496,12 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
             conn.recv_loss_list.lock().await.acknowledge(
                 conn.recv_buf.lock().await.ack_seq()
             );
+            let drop_bytes = dropped as u64 * conn.config.max_payload_size() as u64;
             let mut stats = conn.stats.lock().await;
             stats.pkt_rcv_drop += dropped as i32;
             stats.pkt_rcv_drop_total += dropped as i32;
+            stats.byte_rcv_drop += drop_bytes;
+            stats.byte_rcv_drop_total += drop_bytes;
             log::trace!("Dropped {} too-late packets", dropped);
         }
     }

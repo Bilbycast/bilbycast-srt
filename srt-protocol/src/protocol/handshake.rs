@@ -28,6 +28,8 @@ pub const HANDSHAKE_CONTENT_SIZE: usize = 48;
 pub const HS_EXT_HSREQ: i32 = 1 << 0;
 pub const HS_EXT_KMREQ: i32 = 1 << 1;
 pub const HS_EXT_CONFIG: i32 = 1 << 2;
+/// Alias: Stream ID is carried under the CONFIG extension flag.
+pub const HS_EXT_SID: i32 = HS_EXT_CONFIG;
 
 /// SRT Handshake magic code.
 pub const SRT_MAGIC_CODE: u32 = 0x4A17;

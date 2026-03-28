@@ -339,4 +339,14 @@ impl ReceiveBuffer {
     pub fn available(&self) -> usize {
         self.capacity - self.valid_count
     }
+
+    /// Check if a packet with the given sequence number is in the buffer.
+    pub fn has_packet(&self, seq: SeqNo) -> bool {
+        let offset = SeqNo::offset(self.start_seq, seq);
+        if offset < 0 || offset as usize >= self.capacity {
+            return false;
+        }
+        let pos = (self.start_pos + offset as usize) % self.capacity;
+        self.entries[pos].is_some()
+    }
 }

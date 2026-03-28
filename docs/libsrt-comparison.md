@@ -1,7 +1,7 @@
 # bilbycast-srt vs libsrt v1.5.5 — Comparison
 
 **Date:** 2026-03-27
-**Last updated:** 2026-03-27 (after Token Bucket + Access Control implementation)
+**Last updated:** 2026-03-28 (after SRT FEC, advanced config params, expanded stats — full v1.5.5 feature parity)
 
 **Note:** libsrt v1.5.5 is not yet a stable release — only release candidates (rc.0a, rc.1) exist as of March 2026. bilbycast-srt already advertises wire compatibility with v1.5.5 (`0x010505`).
 
@@ -33,13 +33,14 @@
 | Key rotation (even/odd) | Yes | Yes | 16M pkt refresh, 4096 pkt pre-announce |
 | Enforced encryption | Yes | Yes | |
 | ARQ (NAK retransmit) | Yes | Yes | |
-| FEC (row-only) | Yes | Yes | |
-| FEC (staircase/2D) | Yes | Yes | |
+| FEC (row-only) | Yes | Yes | Config: `"fec,cols:10,rows:1"`. Negotiated via `SRT_CMD_FILTER` (ext type 7) in handshake. |
+| FEC (staircase/2D) | Yes | Yes | Config: `"fec,cols:10,rows:5,layout:staircase"`. Staircase column offsets match libsrt. 2D cascade recovery. |
+| FEC ARQ modes | Yes | Yes | `arq:always` (parallel), `arq:onreq` (FEC-first, default), `arq:never` (FEC-only). NAK suppression matches libsrt. |
 | Too-Late Packet Drop | Yes | Yes | |
-| Stream ID | Yes | Yes | Up to 512 chars; bilbycast-srt parses `SRT_CMD_SID` (ext type 5) from CONCLUSION |
-| Stream ID on accepted socket | Yes | Yes | bilbycast-srt: `socket.stream_id()`; libsrt: `srt_getsockopt(SRTO_STREAMID)` |
+| Stream ID (send + receive) | Yes | Yes | Up to 512 chars. Caller sends `SRT_CMD_SID` (ext type 5) in CONCLUSION; listener parses and stores. Structured `#!::key=value` format parsed via `StreamIdInfo`. |
+| Stream ID on accepted socket | Yes | Yes | bilbycast-srt: `socket.stream_id()` getter; libsrt: `srt_getsockopt(SRTO_STREAMID)` |
 | Drift tracking | Yes | Yes | bilbycast-srt: 1000-sample window |
-| Statistics (80+ counters) | Yes | Yes | |
+| Statistics (80+ counters) | Yes | Yes | Includes FEC stats (recovered/lost/overhead), ACK/NAK, flow control, buffer state, TSBPD delays, reorder metrics |
 | Epoll multiplexing | Yes | Yes | |
 | Bidirectional data | Yes | Yes | |
 | NAK report | Yes | Yes | |
@@ -60,7 +61,7 @@
 | API style | `AccessControl` trait or closure via `access_control_fn()` | C callback via `srt_listen_callback()` |
 | Info provided | `HandshakeInfo { peer_addr, stream_id, is_encrypted, peer_socket_id, peer_version }` | `SRTSOCKET` handle (query any socket option) |
 | Rejection | Returns `Err(RejectReason)` — 18 standard codes | Returns `-1` with `srt_setrejectreason()` — same codes |
-| Stream ID format | Parses `SRT_CMD_SID` extension (type 5) from CONCLUSION | Same wire format |
+| Stream ID format | Sends/parses `SRT_CMD_SID` extension (type 5) in CONCLUSION. `StreamIdInfo` parses `#!::key=value` format (keys: r, m, s, t, u, h). | Same wire format |
 | Per-connection passphrase | Not yet (callback sees `is_encrypted` but can't override) | Yes — callback can call `srt_setsockopt(SRTO_PASSPHRASE)` |
 | Stored on accepted socket | `socket.stream_id()` getter | `srt_getsockopt(SRTO_STREAMID)` |
 
@@ -84,7 +85,7 @@
 | **Cookie contest restored from v1.4.5** | bilbycast-srt should verify its cookie contest logic matches the restored behavior for interop |
 | **Blocking srt_connect error codes fixed** | N/A — bilbycast-srt is async, no blocking API |
 | **Buffer overflow fix in handshake group data** | N/A — bilbycast-srt doesn't implement groups; Rust would catch this at bounds check anyway |
-| **Late-rejection for mismatched packet filter** | bilbycast-srt should verify it handles this case for interop |
+| **Late-rejection for mismatched packet filter** | Parity — bilbycast-srt rejects with `RejectReason::Filter` when FEC parameters conflict |
 | **CMake LIBSRT_ prefix** | N/A — Cargo workspace, no CMake |
 | **Windows ARM64 + HarmonyOS** | Platform gap — bilbycast-srt compiles on any Rust target but hasn't been tested on these |
 
@@ -109,13 +110,13 @@
 
 Since bilbycast-srt advertises version `0x010505`, it should verify:
 - **Cookie contest logic** matches the restored v1.4.5 method (changed in v1.5.5)
-- **Packet filter late-rejection** handling (new in v1.5.5 — listener rejects if caller requests a filter the listener doesn't support)
+- ~~**Packet filter late-rejection** handling~~ — **Done:** bilbycast-srt rejects with `RejectReason::Filter` when FEC parameters conflict during negotiation
 - **AES-GCM 12-byte IV** (changed in v1.5.4, carried into v1.5.5)
-- **Stream ID extension interop** — bilbycast-srt now parses `SRT_CMD_SID` (ext type 5) from CONCLUSION; verify round-trip with libsrt callers
+- **Stream ID extension interop** — bilbycast-srt now sends and parses `SRT_CMD_SID` (ext type 5) in CONCLUSION; verify round-trip with libsrt callers and listeners
 
 ## Summary
 
-bilbycast-srt now matches libsrt v1.5.5 on **access control**, **retransmission bandwidth shaping** (token bucket), and **Stream ID parsing**. The only remaining major feature gap is **bonding/socket groups**. bilbycast-srt leads on AES-GCM maturity, memory safety, architectural cleanliness, and API ergonomics.
+bilbycast-srt now matches libsrt v1.5.5 on **access control**, **retransmission bandwidth shaping** (token bucket), **Stream ID sending and parsing**, **structured Stream ID format** (`#!::key=value`), and **FEC** (row-only, staircase/2D, ARQ integration, handshake negotiation). The only remaining major feature gap is **bonding/socket groups**. bilbycast-srt leads on AES-GCM maturity, memory safety, architectural cleanliness, and API ergonomics.
 
 For bilbycast's use case (media transport gateway with its own relay infrastructure for redundancy), the bonding gap is mitigated by bilbycast-edge's own hitless redundancy and tunnel failover mechanisms.
 

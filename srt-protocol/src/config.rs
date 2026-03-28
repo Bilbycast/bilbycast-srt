@@ -27,6 +27,21 @@ impl Default for TransType {
     }
 }
 
+/// Encryption cipher mode selection.
+///
+/// Determines whether SRT uses AES-CTR (confidentiality only) or AES-GCM
+/// (authenticated encryption with integrity). This enum lives in config
+/// (not behind the `encryption` feature gate) so that `SrtConfig` always compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CryptoModeConfig {
+    /// AES Counter mode (default, compatible with all SRT implementations).
+    #[default]
+    AesCtr,
+    /// AES Galois/Counter mode — authenticated encryption. Requires libsrt >= 1.5.2
+    /// on the peer. Only supports AES-128 and AES-256 (not AES-192).
+    AesGcm,
+}
+
 /// Encryption key length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeySize {
@@ -191,6 +206,8 @@ pub struct SrtConfig {
     pub passphrase: String,
     /// Encryption key length.
     pub key_size: KeySize,
+    /// Encryption cipher mode (AES-CTR or AES-GCM).
+    pub crypto_mode: CryptoModeConfig,
     /// Enforce encryption (reject unencrypted peers).
     pub enforced_encryption: bool,
     /// Key material refresh rate (packets).
@@ -285,6 +302,7 @@ impl Default for SrtConfig {
             // Encryption
             passphrase: String::new(),
             key_size: KeySize::AES128,
+            crypto_mode: CryptoModeConfig::default(),
             enforced_encryption: true,
             km_refresh_rate: 0x0100_0000, // 16M packets
             km_pre_announce: 0x1000,       // 4096 packets

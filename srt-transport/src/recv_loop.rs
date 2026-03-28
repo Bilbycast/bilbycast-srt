@@ -17,7 +17,8 @@ use bytes::{Bytes, BytesMut};
 use srt_protocol::crypto::{CryptoMode, KeyIndex};
 use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::{AckData, ControlType, DropReqData, LossReport};
-use srt_protocol::packet::header::{EncryptionKeySpec, HEADER_SIZE};
+use srt_protocol::packet::header::{EncryptionKeySpec, PacketBoundary, HEADER_SIZE};
+use srt_protocol::packet::msg::MsgNo;
 use srt_protocol::packet::seq::SeqNo;
 use srt_protocol::protocol::connection::ConnectionState;
 use srt_protocol::protocol::handshake::Handshake;
@@ -271,9 +272,12 @@ async fn process_dropreq(conn: &SrtConnection, packet: &SrtPacket) {
             }
         }
         if dropped > 0 {
+            let drop_bytes = dropped as u64 * conn.config.max_payload_size() as u64;
             let mut stats = conn.stats.lock().await;
             stats.pkt_rcv_drop += dropped as i32;
             stats.pkt_rcv_drop_total += dropped as i32;
+            stats.byte_rcv_drop += drop_bytes;
+            stats.byte_rcv_drop_total += drop_bytes;
         }
         log::trace!("DropReq: msg_id={}, seq {}..{}, dropped {} packets",
             msg_id, drop_req.first_seq.value(), drop_req.last_seq.value(), dropped);
@@ -285,6 +289,12 @@ async fn process_data_packet(
     conn: &SrtConnection,
     packet: &SrtPacket,
 ) {
+    // Detect FEC packets: data packets with msgno=0 and boundary=Solo
+    if packet.is_fec_packet() {
+        process_fec_packet(conn, packet).await;
+        return;
+    }
+
     let seq = packet.sequence_number();
     let msg_no = packet.message_number();
     let boundary = packet.boundary();
@@ -295,27 +305,109 @@ async fn process_data_packet(
     let raw_payload = packet.payload();
     let payload_len = packet.payload_len() as u64;
 
+    // Calibrate TSBPD base_time on the first data packet.
+    // The receiver's base_time was set at connection establishment, before any
+    // network delay is known. The first data packet's arrival time tells us the
+    // actual network delay: base_time should be `now - sender_ts` so that
+    // delivery_time(sender_ts) = now + delay (deliver `delay` from now).
+    {
+        let mut calibrated = conn.tsbpd_calibrated.lock().await;
+        if !*calibrated {
+            let ts_duration = std::time::Duration::from_micros(timestamp as u64);
+            let now = std::time::Instant::now();
+            // base_time = now - sender_ts, so delivery_time = now + delay
+            let new_base = now.checked_sub(ts_duration).unwrap_or(now);
+            conn.tsbpd.lock().await.set_base_time(new_base);
+            *calibrated = true;
+            log::debug!(
+                "TSBPD calibrated: first packet ts={}us, base_time adjusted",
+                timestamp
+            );
+        }
+    }
+
     // Decrypt payload if encrypted
     let data = decrypt_payload(conn, enc_key, raw_payload, seq.value() as u32).await;
 
-    // Detect gaps and update loss list
+    // Detect gaps and update loss list.
+    // Reorder tolerance (loss_max_ttl): when > 0, gaps within this distance
+    // of the highest received seq are deferred — they may be filled by
+    // out-of-order packets before being reported as lost. This prevents
+    // jitter-induced reordering from triggering unnecessary NAKs.
     {
         let mut highest = conn.highest_recv_seq.lock().await;
+        let reorder_tolerance = conn.config.loss_max_ttl;
+
         if seq.is_after(*highest) {
-            // Check for gap: if seq > highest + 1, packets in between are missing
+            // New highest seq — check for gap
             let expected = highest.increment();
             if seq.is_after(expected) {
-                let gap_end = seq.add(-1); // last missing seq = seq - 1
+                let gap_end = seq.add(-1);
                 let gap_count = SeqNo::offset(expected, gap_end) + 1;
-                conn.recv_loss_list.lock().await.insert_range(expected, gap_end);
-                let mut stats = conn.stats.lock().await;
-                stats.pkt_rcv_loss += gap_count;
-                stats.pkt_rcv_loss_total += gap_count;
+
+                if reorder_tolerance > 0 {
+                    // With reorder tolerance: only report losses that are far enough
+                    // behind the new highest seq. Gaps within tolerance are deferred.
+                    let threshold = seq.add(-(reorder_tolerance as i32));
+                    let mut loss_list = conn.recv_loss_list.lock().await;
+                    let mut loss_count = 0i32;
+                    let count = SeqNo::offset(expected, gap_end);
+                    for i in 0..=count {
+                        let gap_seq = expected.add(i);
+                        if gap_seq.is_before(threshold) || gap_seq == threshold {
+                            loss_list.insert_range(gap_seq, gap_seq);
+                            loss_count += 1;
+                        }
+                    }
+                    if loss_count > 0 {
+                        let mut stats = conn.stats.lock().await;
+                        stats.pkt_rcv_loss += loss_count;
+                        stats.pkt_rcv_loss_total += loss_count;
+                    }
+                } else {
+                    // No reorder tolerance — report all gaps immediately
+                    conn.recv_loss_list.lock().await.insert_range(expected, gap_end);
+                    let mut stats = conn.stats.lock().await;
+                    stats.pkt_rcv_loss += gap_count;
+                    stats.pkt_rcv_loss_total += gap_count;
+                }
+
                 log::trace!(
                     "Gap detected: expected={}, got={}, missing {} packets",
                     expected.value(), seq.value(), gap_count
                 );
             }
+
+            // Promote deferred gaps: now that highest has advanced, check if
+            // any previously-deferred gaps have exceeded the tolerance window.
+            if reorder_tolerance > 0 {
+                let new_threshold = seq.add(-(reorder_tolerance as i32));
+                let old_highest = *highest;
+                let old_threshold = old_highest.add(-(reorder_tolerance as i32));
+                // Gaps between old_threshold and new_threshold should now be reported
+                if new_threshold.is_after(old_threshold) {
+                    let mut loss_list = conn.recv_loss_list.lock().await;
+                    let recv_buf = conn.recv_buf.lock().await;
+                    let promote_count = SeqNo::offset(old_threshold, new_threshold);
+                    let mut promoted = 0i32;
+                    for i in 1..=promote_count {
+                        let check_seq = old_threshold.add(i);
+                        // Only add if the packet hasn't been received yet
+                        if !recv_buf.has_packet(check_seq) {
+                            loss_list.insert_range(check_seq, check_seq);
+                            promoted += 1;
+                        }
+                    }
+                    if promoted > 0 {
+                        drop(loss_list);
+                        drop(recv_buf);
+                        let mut stats = conn.stats.lock().await;
+                        stats.pkt_rcv_loss += promoted;
+                        stats.pkt_rcv_loss_total += promoted;
+                    }
+                }
+            }
+
             *highest = seq;
         } else {
             // Out-of-order or retransmitted — remove from loss list if present
@@ -329,7 +421,19 @@ async fn process_data_packet(
     // Insert into receive buffer
     {
         let mut recv_buf = conn.recv_buf.lock().await;
-        recv_buf.insert(seq, msg_no, boundary, timestamp, in_order, data);
+        recv_buf.insert(seq, msg_no, boundary, timestamp, in_order, data.clone());
+    }
+
+    // Feed to FEC decoder for group tracking and potential recovery
+    {
+        let mut fec_dec = conn.fec_decoder.lock().await;
+        if let Some(decoder) = fec_dec.as_mut() {
+            let recovered = decoder.on_data_packet(seq, timestamp, enc_key as u8, &data);
+            drop(fec_dec);
+            for pkt in recovered {
+                inject_recovered_packet(conn, pkt).await;
+            }
+        }
     }
 
     // Update statistics
@@ -343,6 +447,81 @@ async fn process_data_packet(
     }
 
     // Notify any waiting receivers
+    conn.recv_data_ready.notify_one();
+}
+
+/// Process a received FEC packet.
+///
+/// FEC packets are data packets with msgno=0 (SRT_MSGNO_CONTROL).
+/// They are NOT inserted into the receive buffer. Instead, they are
+/// fed to the FEC decoder which may recover lost data packets.
+async fn process_fec_packet(conn: &SrtConnection, packet: &SrtPacket) {
+    let seq = packet.sequence_number();
+    let fec_payload = packet.payload();
+
+    // Update FEC receive stats
+    {
+        let mut stats = conn.stats.lock().await;
+        stats.pkt_rcv_filter_extra += 1;
+        stats.pkt_rcv_filter_extra_total += 1;
+    }
+
+    // Feed to FEC decoder
+    let mut fec_dec = conn.fec_decoder.lock().await;
+    if let Some(decoder) = fec_dec.as_mut() {
+        let result = decoder.on_fec_packet(seq, fec_payload);
+        drop(fec_dec);
+
+        // Inject recovered packets into receive buffer
+        for pkt in result.recovered {
+            inject_recovered_packet(conn, pkt).await;
+        }
+
+        // Track uncoverable losses for ARQ OnReq mode
+        if !result.uncoverable.is_empty() {
+            let mut uncov = conn.fec_uncoverable.lock().await;
+            uncov.extend(result.uncoverable);
+        }
+    }
+}
+
+/// Inject a recovered FEC packet into the receive buffer.
+async fn inject_recovered_packet(
+    conn: &SrtConnection,
+    pkt: srt_protocol::fec::decoder::RecoveredPacket,
+) {
+    // Decrypt the recovered payload if needed
+    let data = decrypt_payload(
+        conn,
+        EncryptionKeySpec::from_bits(pkt.enc_flags as u32),
+        &Bytes::copy_from_slice(&pkt.payload),
+        pkt.seq_no.value() as u32,
+    ).await;
+
+    // Insert into receive buffer
+    {
+        let mut recv_buf = conn.recv_buf.lock().await;
+        recv_buf.insert(
+            pkt.seq_no,
+            MsgNo::new(1),
+            PacketBoundary::Solo,
+            pkt.timestamp,
+            true,
+            data,
+        );
+    }
+
+    // Remove from loss list since we recovered it
+    conn.recv_loss_list.lock().await.remove(pkt.seq_no);
+
+    // Update stats
+    {
+        let mut stats = conn.stats.lock().await;
+        stats.pkt_rcv_filter_supply += 1;
+        stats.pkt_rcv_filter_supply_total += 1;
+    }
+
+    // Notify waiting readers
     conn.recv_data_ready.notify_one();
 }
 

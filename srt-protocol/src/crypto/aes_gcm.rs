@@ -47,14 +47,14 @@ impl AesGcmCipher {
     /// - Bits 8-11: Packet index (PKI)
     fn build_nonce(salt: &[u8; 16], pkt_index: u32) -> [u8; 12] {
         let mut nonce = [0u8; 12];
-        nonce[..8].copy_from_slice(&salt[..8]);
+        nonce[..12].copy_from_slice(&salt[..12]);
 
-        // XOR packet index into bytes 8-11
+        // XOR packet index into bytes 8-11 (matches libsrt v1.5.5 HAICRYPT)
         let pki_bytes = pkt_index.to_be_bytes();
-        nonce[8] = pki_bytes[0];
-        nonce[9] = pki_bytes[1];
-        nonce[10] = pki_bytes[2];
-        nonce[11] = pki_bytes[3];
+        nonce[8] ^= pki_bytes[0];
+        nonce[9] ^= pki_bytes[1];
+        nonce[10] ^= pki_bytes[2];
+        nonce[11] ^= pki_bytes[3];
 
         nonce
     }

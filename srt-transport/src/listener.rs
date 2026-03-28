@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 use srt_protocol::access_control::{
     AccessControl, AccessControlFn, AcceptAll, HandshakeInfo, SRT_CMD_SID, parse_stream_id,
 };
-use srt_protocol::config::{KeySize, SrtConfig, SRT_VERSION};
+use srt_protocol::fec;
+use srt_protocol::config::{CryptoModeConfig, KeySize, SrtConfig, SRT_VERSION};
 use srt_protocol::config::srt_options::SrtFlags;
 use srt_protocol::crypto::KeyIndex;
 use srt_protocol::crypto::km_exchange::{CipherType, KeyMaterialMessage};
@@ -56,7 +57,7 @@ impl SrtListenerBuilder {
         }
     }
 
-    /// Set the latency for accepted connections.
+    /// Set the latency for accepted connections (both receiver and peer/sender).
     pub fn latency(mut self, latency: Duration) -> Self {
         let ms = latency.as_millis() as u32;
         self.config.recv_latency = ms;
@@ -64,10 +65,28 @@ impl SrtListenerBuilder {
         self
     }
 
+    /// Set the sender-side (peer) latency independently.
+    pub fn sender_latency(mut self, latency: Duration) -> Self {
+        self.config.peer_latency = latency.as_millis() as u32;
+        self
+    }
+
+    /// Set the receiver-side latency independently.
+    pub fn receiver_latency(mut self, latency: Duration) -> Self {
+        self.config.recv_latency = latency.as_millis() as u32;
+        self
+    }
+
     /// Enable encryption for accepted connections.
     pub fn encryption(mut self, passphrase: &str, key_size: KeySize) -> Self {
         self.config.passphrase = passphrase.to_string();
         self.config.key_size = key_size;
+        self
+    }
+
+    /// Set the encryption cipher mode (AES-CTR or AES-GCM).
+    pub fn crypto_mode(mut self, mode: CryptoModeConfig) -> Self {
+        self.config.crypto_mode = mode;
         self
     }
 
@@ -115,6 +134,99 @@ impl SrtListenerBuilder {
     /// - `> 0`: limit to this many bytes per second
     pub fn max_rexmit_bw(mut self, bw: i64) -> Self {
         self.config.max_rexmit_bw = bw;
+        self
+    }
+
+    /// Set the SRT packet filter configuration string.
+    ///
+    /// Enables FEC (Forward Error Correction) for accepted connections.
+    /// Format: `"fec,cols:10,rows:5,layout:staircase,arq:onreq"`
+    pub fn packet_filter(mut self, filter: String) -> Self {
+        self.config.packet_filter = filter;
+        self
+    }
+
+    /// Set the maximum bandwidth in bytes per second (0 = unlimited).
+    pub fn max_bw(mut self, bw: i64) -> Self {
+        self.config.max_bw = bw;
+        self
+    }
+
+    /// Set the estimated input bandwidth in bytes per second.
+    pub fn input_bw(mut self, bw: i64) -> Self {
+        self.config.input_bw = bw;
+        self
+    }
+
+    /// Set the overhead bandwidth as a percentage over the input rate.
+    pub fn overhead_bw(mut self, pct: i32) -> Self {
+        self.config.overhead_bw = pct;
+        self
+    }
+
+    /// Set whether to enforce encryption.
+    pub fn enforced_encryption(mut self, enforce: bool) -> Self {
+        self.config.enforced_encryption = enforce;
+        self
+    }
+
+    /// Set the flight flag size (flow control window).
+    pub fn flight_flag_size(mut self, size: u32) -> Self {
+        self.config.flight_flag_size = size;
+        self
+    }
+
+    /// Set the send buffer size.
+    pub fn send_buffer_size(mut self, size: u32) -> Self {
+        self.config.send_buffer_size = size;
+        self
+    }
+
+    /// Set the receive buffer size.
+    pub fn recv_buffer_size(mut self, size: u32) -> Self {
+        self.config.recv_buffer_size = size;
+        self
+    }
+
+    /// Set the IP Type of Service / DSCP.
+    pub fn ip_tos(mut self, tos: i32) -> Self {
+        self.config.ip_tos = tos;
+        self
+    }
+
+    /// Set the retransmission algorithm.
+    pub fn retransmit_algo(mut self, algo: srt_protocol::config::RetransmitAlgo) -> Self {
+        self.config.retransmit_algo = algo;
+        self
+    }
+
+    /// Set the extra delay in ms before sender drops a packet.
+    pub fn send_drop_delay(mut self, delay: i32) -> Self {
+        self.config.send_drop_delay = delay;
+        self
+    }
+
+    /// Set the maximum packet reorder tolerance.
+    pub fn loss_max_ttl(mut self, ttl: i32) -> Self {
+        self.config.loss_max_ttl = ttl;
+        self
+    }
+
+    /// Set the key material refresh rate.
+    pub fn km_refresh_rate(mut self, rate: u32) -> Self {
+        self.config.km_refresh_rate = rate;
+        self
+    }
+
+    /// Set the key material pre-announce count.
+    pub fn km_pre_announce(mut self, count: u32) -> Self {
+        self.config.km_pre_announce = count;
+        self
+    }
+
+    /// Set the connection timeout.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.config.connect_timeout = timeout;
         self
     }
 
@@ -385,16 +497,22 @@ async fn accept_loop(
             conclusion_addr
         );
 
-        // Parse extensions from caller's CONCLUSION (KMREQ, Stream ID)
+        // Parse extensions from caller's CONCLUSION (KMREQ, Stream ID, Filter)
         let mut km_response: Option<KeyMaterialMessage> = None;
         let mut peer_sek: Option<Vec<u8>> = None;
         let mut peer_salt: Option<[u8; 16]> = None;
         let mut peer_stream_id = String::new();
+        let mut peer_filter_config = String::new();
         let mut is_encrypted = false;
         if !conclusion_ext_bytes.is_empty() {
             let extensions = HandshakeExtension::parse_extensions(&conclusion_ext_bytes);
             for ext in &extensions {
                 match ext.ext_type {
+                    7 => {
+                        // SRT_CMD_FILTER — packet filter config
+                        peer_filter_config = fec::parse_filter_extension(&ext.data);
+                        log::debug!("Listener: received Filter config: {:?}", peer_filter_config);
+                    }
                     3 if config.encryption_enabled() => {
                         // KmReq — convert u32 data to bytes
                         let km_bytes: Vec<u8> = ext.data.iter().flat_map(|w| w.to_be_bytes()).collect();
@@ -465,9 +583,34 @@ async fn accept_loop(
             continue;
         }
 
+        // Negotiate FEC filter if either side has a config
+        let negotiated_filter = match fec::negotiate_filter(&config.packet_filter, &peer_filter_config) {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("Listener: FEC filter negotiation failed: {}", e);
+                // Send rejection
+                let rejection = Handshake {
+                    version: HS_VERSION_SRT1,
+                    ext_flags: 0,
+                    isn: 0,
+                    mss: config.mss as i32,
+                    flight_flag_size: config.flight_flag_size as i32,
+                    req_type: HandshakeType::Failure(RejectReason::Filter),
+                    socket_id: listener_socket_id as i32,
+                    cookie: cookie as i32,
+                    peer_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                };
+                let pkt = build_handshake_packet(&rejection, conclusion_hs.socket_id as u32);
+                let _ = mux.send_to(&pkt, conclusion_addr).await;
+                mux.remove_connection(listener_socket_id).await;
+                continue;
+            }
+        };
+
         // Create a new connection for the accepted peer, storing the caller's Stream ID
         let mut conn_config = config.clone();
         conn_config.stream_id = peer_stream_id;
+        conn_config.packet_filter = negotiated_filter.clone();
         let new_conn = Arc::new(SrtConnection::new(
             conn_config,
             mux.local_addr(),
@@ -492,7 +635,21 @@ async fn accept_loop(
             }
         }
 
+        // Reset TSBPD base time to now (connection establishment time).
+        // SrtConnection::new() was called moments ago but the sender's
+        // start_time on the caller side was set before the handshake.
+        // Aligning base_time here ensures TSBPD delivery calculations match.
+        new_conn.tsbpd.lock().await.set_base_time(std::time::Instant::now());
+
         new_conn.set_state(ConnectionState::Connected).await;
+
+        // Initialize FEC if negotiated
+        if !negotiated_filter.is_empty() {
+            if let Ok(fec_config) = fec::FecConfig::parse(&negotiated_filter) {
+                new_conn.init_fec(fec_config).await;
+                log::info!("Listener: FEC initialized with config: {}", negotiated_filter);
+            }
+        }
 
         // Register the new connection in the multiplexer for data routing
         mux.add_connection(listener_socket_id, new_conn.clone()).await;
@@ -532,6 +689,15 @@ async fn accept_loop(
                 ext_buf.put_u8(0);
             }
             resp_ext_flags |= HS_EXT_KMREQ;
+        }
+
+        // Add Filter extension to response if FEC was negotiated
+        if !negotiated_filter.is_empty() {
+            let filter_words = fec::serialize_filter_extension(&negotiated_filter);
+            for word in &filter_words {
+                ext_buf.put_u32(*word);
+            }
+            log::debug!("Listener: echoing negotiated FEC filter: {}", negotiated_filter);
         }
 
         let conclusion_response = Handshake {

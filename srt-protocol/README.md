@@ -77,7 +77,7 @@ All crypto uses pure-Rust [RustCrypto](https://github.com/RustCrypto) crates:
 
 - `key_material` - PBKDF2-HMAC-SHA1 key derivation (2048 iterations), AES Key Wrap (RFC 3394)
 - `aes_ctr` - AES-CTR encryption (128/192/256-bit)
-- `aes_gcm` - AES-GCM authenticated encryption (128/192/256-bit)
+- `aes_gcm` - AES-GCM authenticated encryption (128/256-bit; 192-bit not supported)
 - `km_exchange` - Key Material message encoding/decoding for KMREQ/KMRSP
 - `mod` - CryptoControl state machine with even/odd key rotation
 
@@ -90,10 +90,16 @@ All crypto uses pure-Rust [RustCrypto](https://github.com/RustCrypto) crates:
 
 `SrtConfig` contains all configurable parameters:
 
-- Latency, buffer sizes, max bandwidth, TTL
-- Encryption key size, passphrase, crypto mode
-- Transport type (Live/File), congestion controller selection
-- Stream ID, peer idle timeout, and more
+- **Latency**: `recv_latency` (receiver buffer), `peer_latency` (sender-side minimum)
+- **Buffers**: `send_buffer_size`, `recv_buffer_size` (bytes), `flight_flag_size` (flow control window, packets)
+- **Bandwidth**: `max_bw` (total send rate cap), `input_bw` (estimated input rate), `overhead_bw` (overhead %), `max_rexmit_bw` (retransmit cap via Token Bucket)
+- **Encryption**: `passphrase`, `key_size` (128/192/256), `crypto_mode` (AES-CTR or AES-GCM), `enforced_encryption` (reject unencrypted peers), `km_refresh_rate` / `km_pre_announce` (key rotation timing)
+- **Transport**: `trans_type` (Live/File), `payload_size` (default 1316 for MPEG-TS), `mss` (max segment size)
+- **Connection**: `connect_timeout`, `peer_idle_timeout`, `rendezvous`
+- **Live mode**: `tsbpd_mode`, `tlpkt_drop` (too-late drop), `send_drop_delay`, `nak_report`, `drift_tracer`
+- **Tuning**: `retransmit_algo` (Default or Reduced), `loss_max_ttl` (reorder tolerance), `ip_tos` (DSCP)
+- **Access control**: `stream_id`, `packet_filter` (FEC config string)
+- **Congestion**: `congestion` controller type ("live" or "file")
 
 ### `error` - Error Types
 

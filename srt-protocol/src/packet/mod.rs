@@ -268,6 +268,60 @@ impl SrtPacket {
         &self.header
     }
 
+    /// Get the raw MSGNO word (Word 1) without any field extraction.
+    ///
+    /// This is needed for FEC packet detection, where msgno=0 is a sentinel
+    /// value that `MsgNo::new()` would clamp to 1.
+    #[inline]
+    pub fn raw_msgno_word(&self) -> u32 {
+        self.header[PH_MSGNO]
+    }
+
+    /// Check if this is an FEC packet.
+    ///
+    /// FEC packets are data packets (not control) with message number = 0
+    /// and boundary = Solo. The raw MSGNO word is `0xC000_0000 | (kflg << 27)`.
+    #[inline]
+    pub fn is_fec_packet(&self) -> bool {
+        if self.is_control() {
+            return false;
+        }
+        let msgno_word = self.header[PH_MSGNO];
+        // Check: boundary == Solo (bits 31-30 = 11) AND msgno == 0 (bits 25-0 = 0)
+        let boundary = (msgno_word >> MSGNO_BOUNDARY_SHIFT) & 0x3;
+        let msgno = msgno_word & MSGNO_SEQ_MASK;
+        boundary == PacketBoundary::Solo as u32 && msgno == 0
+    }
+
+    /// Create an FEC data packet.
+    ///
+    /// FEC packets are sent as regular SRT data packets with a special MSGNO word:
+    /// `0xC000_0000` (PB_SOLO + msgno=0). The payload contains the 4-byte FEC header
+    /// followed by XOR parity data.
+    ///
+    /// FEC packets are NOT encrypted themselves — they carry XOR'd encrypted payloads.
+    /// The encryption key spec is set to NoEnc (0).
+    pub fn new_fec_data(
+        seq: SeqNo,
+        timestamp: u32,
+        dest_socket_id: u32,
+        payload: Bytes,
+    ) -> Self {
+        // PB_SOLO (11 << 30) + msgno=0 = 0xC000_0000
+        let msgno_field: u32 = (PacketBoundary::Solo as u32) << MSGNO_BOUNDARY_SHIFT;
+        // No encryption, no rexmit, no in-order flag, msgno=0
+
+        Self {
+            header: [
+                seq.value() as u32, // bit 31 = 0 (data packet)
+                msgno_field,
+                timestamp,
+                dest_socket_id,
+            ],
+            payload,
+        }
+    }
+
     // ── Serialization ──
 
     /// Serialize the packet to network byte order into a buffer.
@@ -420,6 +474,48 @@ mod tests {
 
         pkt.set_encryption_key(EncryptionKeySpec::NoEnc);
         assert_eq!(pkt.encryption_key(), EncryptionKeySpec::NoEnc);
+    }
+
+    #[test]
+    fn test_fec_packet() {
+        let fec_pkt = SrtPacket::new_fec_data(
+            SeqNo::new(99),
+            12345,
+            42,
+            Bytes::from_static(b"\xFF\x00\x05\x1Cparity_data"),
+        );
+
+        assert!(fec_pkt.is_data());
+        assert!(!fec_pkt.is_control());
+        assert!(fec_pkt.is_fec_packet());
+        assert_eq!(fec_pkt.sequence_number(), SeqNo::new(99));
+        assert_eq!(fec_pkt.timestamp(), 12345);
+        assert_eq!(fec_pkt.boundary(), PacketBoundary::Solo);
+        assert_eq!(fec_pkt.encryption_key(), EncryptionKeySpec::NoEnc);
+        // Raw MSGNO should be 0xC0000000
+        assert_eq!(fec_pkt.raw_msgno_word(), 0xC000_0000);
+
+        // Roundtrip
+        let bytes = fec_pkt.to_bytes();
+        let pkt2 = SrtPacket::deserialize(&bytes).unwrap();
+        assert!(pkt2.is_fec_packet());
+        assert_eq!(pkt2.sequence_number(), SeqNo::new(99));
+    }
+
+    #[test]
+    fn test_regular_data_not_fec() {
+        let pkt = SrtPacket::new_data(
+            SeqNo::new(1),
+            MsgNo::new(1),
+            PacketBoundary::Solo,
+            false,
+            EncryptionKeySpec::NoEnc,
+            false,
+            0,
+            0,
+            Bytes::from_static(b"hello"),
+        );
+        assert!(!pkt.is_fec_packet());
     }
 
     #[test]

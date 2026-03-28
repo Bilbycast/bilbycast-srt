@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use bytes::{BufMut, BytesMut};
 
+use srt_protocol::access_control::serialize_stream_id;
+use srt_protocol::fec;
 use srt_protocol::config::srt_options::SrtFlags;
 use srt_protocol::config::SRT_VERSION;
 use srt_protocol::crypto::KeyIndex;
@@ -28,7 +30,7 @@ use srt_protocol::packet::control::ControlType;
 use srt_protocol::packet::header::HEADER_SIZE;
 use srt_protocol::protocol::connection::ConnectionState;
 use srt_protocol::protocol::handshake::{
-    HS_EXT_HSREQ, HS_EXT_KMREQ, HS_VERSION_SRT1, HS_VERSION_UDT4, Handshake,
+    HS_EXT_HSREQ, HS_EXT_KMREQ, HS_EXT_SID, HS_VERSION_SRT1, HS_VERSION_UDT4, Handshake,
     HandshakeExtension, HandshakeType, SrtHsExtension,
 };
 
@@ -113,7 +115,8 @@ pub async fn connect(
         | SrtFlags::TSBPD_RCV
         | SrtFlags::TLPKT_DROP
         | SrtFlags::NAK_REPORT
-        | SrtFlags::REXMIT_FLG;
+        | SrtFlags::REXMIT_FLG
+        | SrtFlags::FILTER_CAP;
     srt_ext.set_recv_tsbpd_delay(conn.config.recv_latency as u16);
     srt_ext.set_send_tsbpd_delay(conn.config.peer_latency as u16);
 
@@ -158,6 +161,24 @@ pub async fn connect(
                 }
             }
         }
+    }
+
+    // Build Stream ID extension (SRT_CMD_SID) if stream_id is set
+    if !conn.config.stream_id.is_empty() {
+        let sid_words = serialize_stream_id(&conn.config.stream_id);
+        for word in &sid_words {
+            ext_buf.put_u32(*word);
+        }
+        ext_flags |= HS_EXT_SID;
+    }
+
+    // Build Filter extension (SRT_CMD_FILTER) if packet_filter is set
+    if !conn.config.packet_filter.is_empty() {
+        let filter_words = fec::serialize_filter_extension(&conn.config.packet_filter);
+        for word in &filter_words {
+            ext_buf.put_u32(*word);
+        }
+        ext_flags |= HS_EXT_SID; // Filter uses HS_EXT_CONFIG which equals HS_EXT_SID
     }
 
     let conclusion_hs = Handshake {
@@ -215,11 +236,16 @@ pub async fn connect(
         return Err(SrtError::ConnectionFail);
     }
 
-    // Parse KMRSP from conclusion extensions (if encryption enabled)
+    // Parse extensions from CONCLUSION response (KMRSP, Filter)
+    let mut negotiated_filter = String::new();
     if !conclusion_ext_bytes.is_empty() {
         let extensions = HandshakeExtension::parse_extensions(&conclusion_ext_bytes);
         for ext in &extensions {
-            if ext.ext_type == 4 {
+            if ext.ext_type == 7 {
+                // SRT_CMD_FILTER response — negotiated filter config
+                negotiated_filter = fec::parse_filter_extension(&ext.data);
+                log::debug!("HSv5 caller: received Filter config: {}", negotiated_filter);
+            } else if ext.ext_type == 4 {
                 // KmRsp — convert u32 data back to bytes
                 let km_bytes: Vec<u8> = ext.data.iter().flat_map(|w| w.to_be_bytes()).collect();
                 if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes) {
@@ -239,6 +265,25 @@ pub async fn connect(
     // Store peer socket ID and initialize receive buffer with peer's ISN
     *conn.peer_socket_id.lock().await = conclusion_response.socket_id as u32;
     conn.set_peer_isn(srt_protocol::packet::seq::SeqNo::new(conclusion_response.isn)).await;
+
+    // Initialize FEC if negotiated (or if we sent a filter and peer accepted)
+    let filter_to_use = if !negotiated_filter.is_empty() {
+        negotiated_filter
+    } else {
+        conn.config.packet_filter.clone()
+    };
+    if !filter_to_use.is_empty() {
+        if let Ok(fec_config) = fec::FecConfig::parse(&filter_to_use) {
+            conn.init_fec(fec_config).await;
+            log::info!("HSv5 caller: FEC initialized with config: {}", filter_to_use);
+        }
+    }
+
+    // Reset TSBPD base time to now (connection establishment time).
+    // The base_time was originally set at SrtConnection::new() before the
+    // handshake started. Resetting it here ensures sender timestamps
+    // (relative to start_time) align with the receiver's TSBPD schedule.
+    conn.tsbpd.lock().await.set_base_time(std::time::Instant::now());
 
     // Connected!
     conn.set_state(ConnectionState::Connected).await;

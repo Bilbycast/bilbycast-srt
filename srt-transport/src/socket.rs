@@ -16,7 +16,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use srt_protocol::config::{KeySize, SrtConfig, SocketStatus};
+use srt_protocol::config::{CryptoModeConfig, KeySize, SrtConfig, SocketStatus};
 use srt_protocol::error::SrtError;
 use srt_protocol::packet::SrtPacket;
 use srt_protocol::packet::control::ControlType;
@@ -71,6 +71,12 @@ impl SrtSocketBuilder {
     pub fn encryption(mut self, passphrase: &str, key_size: KeySize) -> Self {
         self.config.passphrase = passphrase.to_string();
         self.config.key_size = key_size;
+        self
+    }
+
+    /// Set the encryption cipher mode (AES-CTR or AES-GCM).
+    pub fn crypto_mode(mut self, mode: CryptoModeConfig) -> Self {
+        self.config.crypto_mode = mode;
         self
     }
 
@@ -149,6 +155,79 @@ impl SrtSocketBuilder {
     /// - `> 0`: limit to this many bytes per second
     pub fn max_rexmit_bw(mut self, bw: i64) -> Self {
         self.config.max_rexmit_bw = bw;
+        self
+    }
+
+    /// Set the SRT packet filter configuration string.
+    ///
+    /// Enables FEC (Forward Error Correction) on this connection.
+    /// Format: `"fec,cols:10,rows:5,layout:staircase,arq:onreq"`
+    ///
+    /// Both sides must agree on the FEC parameters during handshake.
+    pub fn packet_filter(mut self, filter: String) -> Self {
+        self.config.packet_filter = filter;
+        self
+    }
+
+    /// Set the maximum bandwidth in bytes per second.
+    /// 0 = unlimited (default). Limits total send rate including retransmissions.
+    pub fn max_bw(mut self, bw: i64) -> Self {
+        self.config.max_bw = bw;
+        self
+    }
+
+    /// Set the estimated input bandwidth in bytes per second.
+    /// Helps congestion control estimate the send rate. 0 = auto-detect.
+    pub fn input_bw(mut self, bw: i64) -> Self {
+        self.config.input_bw = bw;
+        self
+    }
+
+    /// Set the overhead bandwidth as a percentage over the input rate (5-100).
+    pub fn overhead_bw(mut self, pct: i32) -> Self {
+        self.config.overhead_bw = pct;
+        self
+    }
+
+    /// Set whether to enforce encryption (reject unencrypted peers).
+    pub fn enforced_encryption(mut self, enforce: bool) -> Self {
+        self.config.enforced_encryption = enforce;
+        self
+    }
+
+    /// Set the IP Type of Service / DSCP value.
+    pub fn ip_tos(mut self, tos: i32) -> Self {
+        self.config.ip_tos = tos;
+        self
+    }
+
+    /// Set the retransmission algorithm.
+    pub fn retransmit_algo(mut self, algo: srt_protocol::config::RetransmitAlgo) -> Self {
+        self.config.retransmit_algo = algo;
+        self
+    }
+
+    /// Set the extra delay in ms before the sender drops a packet (-1 = off).
+    pub fn send_drop_delay(mut self, delay: i32) -> Self {
+        self.config.send_drop_delay = delay;
+        self
+    }
+
+    /// Set the maximum packet reorder tolerance (0 = adaptive).
+    pub fn loss_max_ttl(mut self, ttl: i32) -> Self {
+        self.config.loss_max_ttl = ttl;
+        self
+    }
+
+    /// Set the key material refresh rate in packets.
+    pub fn km_refresh_rate(mut self, rate: u32) -> Self {
+        self.config.km_refresh_rate = rate;
+        self
+    }
+
+    /// Set the key material pre-announce count (packets before refresh).
+    pub fn km_pre_announce(mut self, count: u32) -> Self {
+        self.config.km_pre_announce = count;
         self
     }
 

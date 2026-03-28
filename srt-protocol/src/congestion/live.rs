@@ -126,6 +126,10 @@ impl CongestionControl for LiveCC {
         self.update_send_period();
     }
 
+    fn bandwidth(&self) -> i32 {
+        self.bandwidth
+    }
+
     fn rexmit_method(&self) -> RexmitMethod {
         RexmitMethod::LateRexmit
     }
