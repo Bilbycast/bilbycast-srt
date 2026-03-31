@@ -35,6 +35,8 @@ impl UdpChannel {
         };
         let sock2 = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
         sock2.set_reuse_address(true)?;
+        #[cfg(not(windows))]
+        sock2.set_reuse_port(true)?;
         sock2.set_nonblocking(true)?;
         sock2.bind(&addr.into())?;
         let std_socket: std::net::UdpSocket = sock2.into();

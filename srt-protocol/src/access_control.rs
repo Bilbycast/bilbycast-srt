@@ -115,12 +115,13 @@ pub const SRT_MAX_STREAM_ID_LEN: usize = 512;
 /// Parse the Stream ID from a handshake extension block.
 ///
 /// The Stream ID extension (type 5 / `SRT_CMD_SID`) carries UTF-8 text
-/// packed into u32 words in network byte order, with optional trailing
-/// null padding.
+/// packed into u32 words in little-endian byte order (matching libsrt's
+/// HtoILA/ItoHLA encoding for string-based extensions), with optional
+/// trailing null padding.
 pub fn parse_stream_id(ext_data: &[u32]) -> String {
     let bytes: Vec<u8> = ext_data
         .iter()
-        .flat_map(|w| w.to_be_bytes())
+        .flat_map(|w| w.to_le_bytes())
         .collect();
     // Trim trailing null bytes (padding)
     let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
@@ -129,8 +130,9 @@ pub fn parse_stream_id(ext_data: &[u32]) -> String {
 
 /// Serialize a Stream ID string into u32 words for the SRT_CMD_SID extension.
 ///
-/// The string is encoded as UTF-8 bytes packed into big-endian u32 words,
-/// with trailing null-byte padding to the next 4-byte boundary.
+/// The string is encoded as UTF-8 bytes packed into little-endian u32 words
+/// (matching libsrt's HtoILA encoding), with trailing null-byte padding to
+/// the next 4-byte boundary.
 /// Returns the extension header word followed by the data words.
 pub fn serialize_stream_id(stream_id: &str) -> Vec<u32> {
     if stream_id.is_empty() {
@@ -145,8 +147,10 @@ pub fn serialize_stream_id(stream_id: &str) -> Vec<u32> {
     let mut words = Vec::with_capacity(1 + size_words);
     // Extension header: type=SID(5), size in words
     words.push((SRT_CMD_SID as u32) << 16 | size_words as u32);
+    // String-based extensions use little-endian u32 packing (HtoILA in libsrt).
+    // See fec/mod.rs serialize_filter_extension for detailed explanation.
     for chunk in bytes.chunks(4) {
-        words.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     words
 }
@@ -279,15 +283,15 @@ mod tests {
 
     #[test]
     fn test_parse_stream_id_simple() {
-        // "test" = [0x74657374]
-        let data = vec![0x7465_7374];
+        // "test" packed as LE u32: bytes [0x74,0x65,0x73,0x74] → LE u32 = 0x74736574
+        let data = vec![u32::from_le_bytes(*b"test")];
         assert_eq!(parse_stream_id(&data), "test");
     }
 
     #[test]
     fn test_parse_stream_id_with_padding() {
-        // "hi" = [0x68690000]
-        let data = vec![0x6869_0000];
+        // "hi" packed as LE u32: bytes [0x68,0x69,0x00,0x00] → LE u32
+        let data = vec![u32::from_le_bytes([0x68, 0x69, 0x00, 0x00])];
         assert_eq!(parse_stream_id(&data), "hi");
     }
 
@@ -306,7 +310,7 @@ mod tests {
             bytes.push(0);
         }
         let data: Vec<u32> = bytes.chunks(4)
-            .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(parse_stream_id(&data), "hello world");
     }

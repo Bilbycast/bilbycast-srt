@@ -60,14 +60,16 @@ impl KeySize {
         }
     }
 
-    /// Encode key size into the 3-bit field used in handshake (value >> 3).
-    pub fn to_hs_bits(self) -> u32 {
-        (self as u32) >> 3
+    /// Encode key size into the KM Klen/4 field (key_size_bytes / 4).
+    ///
+    /// Per SRT spec: Klen/4 values are {4, 6, 8} for AES-{128, 192, 256}.
+    pub fn to_km_field(self) -> u32 {
+        (self as u32) / 4
     }
 
-    /// Decode from the 3-bit handshake field (value << 3).
-    pub fn from_hs_bits(bits: u32) -> Option<Self> {
-        Self::from_bytes(((bits & 0x7) << 3) as usize)
+    /// Decode from the KM Klen/4 field (value * 4 → key_size_bytes).
+    pub fn from_km_field(field: u32) -> Option<Self> {
+        Self::from_bytes((field * 4) as usize)
     }
 }
 

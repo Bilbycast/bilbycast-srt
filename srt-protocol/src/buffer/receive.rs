@@ -29,6 +29,11 @@ pub enum SlotState {
     Read,
     /// Slot was dropped (too late).
     Dropped,
+    /// Slot holds an FEC packet placeholder — counted as received for ACK
+    /// continuity but not deliverable to the application. This matches libsrt
+    /// behavior where FEC packets occupy receive buffer slots for ACK tracking
+    /// but are processed by the FEC decoder, not the application.
+    FecPlaceholder,
 }
 
 /// An entry in the receive buffer.
@@ -68,6 +73,11 @@ pub struct ReceiveBuffer {
     start_seq: SeqNo,
     /// Number of valid (unread) packets.
     valid_count: usize,
+    /// Highest sequence number received from the network (data or FEC).
+    /// Used to cap `ack_seq()` so it never exceeds what the sender actually sent.
+    /// FEC recovery can fill in gaps and make the contiguous range appear to
+    /// extend beyond the sender's current position — the cap prevents this.
+    highest_recv_seq: Option<SeqNo>,
 }
 
 impl ReceiveBuffer {
@@ -80,6 +90,7 @@ impl ReceiveBuffer {
             start_pos: 0,
             start_seq: initial_seq,
             valid_count: 0,
+            highest_recv_seq: None,
         }
     }
 
@@ -126,6 +137,35 @@ impl ReceiveBuffer {
         true
     }
 
+    /// Insert an FEC placeholder at the given sequence number.
+    ///
+    /// FEC packets occupy sequence number slots but are not deliverable to the
+    /// application. The placeholder ensures `ack_seq()` counts the slot as
+    /// received (no gap in the contiguous sequence) and `get_loss_list()` does
+    /// not report it as missing. `read_message()` skips over placeholders.
+    pub fn insert_fec_placeholder(&mut self, seq_no: SeqNo, timestamp: u32) -> bool {
+        let offset = SeqNo::offset(self.start_seq, seq_no);
+        if offset < 0 || offset as usize >= self.capacity {
+            return false;
+        }
+        let pos = (self.start_pos + offset as usize) % self.capacity;
+        if self.entries[pos].is_some() {
+            return false; // Already occupied
+        }
+        self.entries[pos] = Some(ReceiveEntry {
+            data: Bytes::new(),
+            seq_no,
+            msg_no: MsgNo::new(0),
+            boundary: PacketBoundary::Solo,
+            timestamp,
+            in_order: false,
+            state: SlotState::FecPlaceholder,
+            arrival_time: Instant::now(),
+        });
+        // Don't increment valid_count — FEC placeholders are not deliverable data
+        true
+    }
+
     /// Read the next available message from the buffer.
     ///
     /// In message mode, returns a complete message (all packets from First to Last
@@ -133,6 +173,17 @@ impl ReceiveBuffer {
     ///
     /// If `tsbpd` is provided, only returns data whose delivery time has arrived.
     pub fn read_message(&mut self, tsbpd: Option<&TsbpdTime>) -> Option<Bytes> {
+        // Skip FEC placeholders at the head of the buffer — they occupy sequence
+        // slots for ACK tracking but are not deliverable data.
+        while let Some(entry) = &self.entries[self.start_pos] {
+            if entry.state == SlotState::FecPlaceholder {
+                self.entries[self.start_pos] = None;
+                self.advance_start(1);
+            } else {
+                break;
+            }
+        }
+
         // Find the first valid entry
         let first = self.entries[self.start_pos].as_ref()?;
 
@@ -193,6 +244,16 @@ impl ReceiveBuffer {
 
     /// Read available data in stream mode (returns contiguous bytes).
     pub fn read_stream(&mut self, max_len: usize) -> Bytes {
+        // Skip FEC placeholders at the head
+        while let Some(entry) = &self.entries[self.start_pos] {
+            if entry.state == SlotState::FecPlaceholder {
+                self.entries[self.start_pos] = None;
+                self.advance_start(1);
+            } else {
+                break;
+            }
+        }
+
         let mut result = BytesMut::new();
         let mut count = 0;
 
@@ -230,8 +291,11 @@ impl ReceiveBuffer {
             let pos = self.start_pos;
             match &self.entries[pos] {
                 Some(entry) if tsbpd.is_too_late(entry.timestamp) => {
+                    let is_fec = entry.state == SlotState::FecPlaceholder;
                     self.entries[pos] = None;
-                    self.valid_count -= 1;
+                    if !is_fec {
+                        self.valid_count -= 1;
+                    }
                     self.advance_start(1);
                     dropped += 1;
                 }
@@ -271,9 +335,12 @@ impl ReceiveBuffer {
             let offset = SeqNo::offset(self.start_seq, seq);
             if offset >= 0 && (offset as usize) < self.capacity {
                 let pos = (self.start_pos + offset as usize) % self.capacity;
-                if self.entries[pos].is_some() {
+                if let Some(entry) = &self.entries[pos] {
+                    let is_fec = entry.state == SlotState::FecPlaceholder;
                     self.entries[pos] = None;
-                    self.valid_count -= 1;
+                    if !is_fec {
+                        self.valid_count -= 1;
+                    }
                     dropped += 1;
                 }
             }
@@ -286,7 +353,24 @@ impl ReceiveBuffer {
         self.start_seq = self.start_seq.add(count as i32);
     }
 
+    /// Update the highest sequence number received from the network.
+    /// Call this for every data packet and FEC packet received from the peer
+    /// (but NOT for FEC-recovered packets, which fill in earlier gaps).
+    pub fn update_highest_recv(&mut self, seq: SeqNo) {
+        match self.highest_recv_seq {
+            Some(h) if seq.is_after(h) => self.highest_recv_seq = Some(seq),
+            None => self.highest_recv_seq = Some(seq),
+            _ => {}
+        }
+    }
+
     /// Get the ACK sequence number (first unacknowledged gap).
+    ///
+    /// The result is capped at `highest_recv_seq + 1` to prevent FEC recovery
+    /// from inflating the ACK beyond what the sender actually sent. Without
+    /// this cap, FEC-recovered packets can make the contiguous range appear
+    /// to extend past the sender's current sequence, triggering libsrt's
+    /// "ATTACK/IPE: incoming ack seq exceeds current" error.
     pub fn ack_seq(&self) -> SeqNo {
         let mut offset = 0;
         while offset < self.capacity {
@@ -296,7 +380,16 @@ impl ReceiveBuffer {
             }
             offset += 1;
         }
-        self.start_seq.add(offset as i32)
+        let raw_ack = self.start_seq.add(offset as i32);
+
+        // Cap at highest_recv_seq + 1 so we never ACK beyond what was sent
+        if let Some(highest) = self.highest_recv_seq {
+            let max_ack = highest.increment();
+            if raw_ack.is_after(max_ack) {
+                return max_ack;
+            }
+        }
+        raw_ack
     }
 
     /// Get the list of missing sequence numbers (for NAK generation).

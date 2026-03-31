@@ -426,6 +426,12 @@ impl SrtSocket {
     ///
     /// Blocks until data is available or the connection is closed.
     pub async fn recv(&self) -> Result<Bytes, SrtError> {
+        // Signal that the app is actively draining — suppresses drop_too_late
+        // in send_loop to avoid racing with this read path.
+        self.connection
+            .app_recv_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         loop {
             if !self.connection.is_active().await {
                 return Err(SrtError::NoConnection);
@@ -435,6 +441,7 @@ impl SrtSocket {
             {
                 let mut recv_buf = self.connection.recv_buf.lock().await;
                 if let Some(data) = recv_buf.read_message(None) {
+                    self.connection.update_recv_buf_cache(&recv_buf);
                     return Ok(data);
                 }
             }

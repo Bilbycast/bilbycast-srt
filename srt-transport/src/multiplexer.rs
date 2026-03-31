@@ -33,6 +33,8 @@ pub struct Multiplexer {
     /// Rendezvous socket (if any) for receiving WAVEAHAND packets at dest_socket_id=0.
     /// Mutually exclusive with listener — a multiplexer is either in listener or rendezvous mode.
     rendezvous: RwLock<Option<Arc<SrtConnection>>>,
+    /// Shutdown flag — when true, recv_loop should exit.
+    shutdown: std::sync::atomic::AtomicBool,
 }
 
 impl Multiplexer {
@@ -43,6 +45,7 @@ impl Multiplexer {
             routes: RwLock::new(HashMap::new()),
             listener: RwLock::new(None),
             rendezvous: RwLock::new(None),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -119,5 +122,22 @@ impl Multiplexer {
     pub async fn connection_count(&self) -> usize {
         let routes = self.routes.read().await;
         routes.len()
+    }
+
+    /// Remove all connections from the routing table.
+    pub async fn clear_all_routes(&self) {
+        let mut routes = self.routes.write().await;
+        routes.clear();
+    }
+
+    /// Signal shutdown. recv_loop checks this flag and exits, allowing
+    /// the UDP socket to be released.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Check if shutdown has been signalled.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(std::sync::atomic::Ordering::Acquire)
     }
 }

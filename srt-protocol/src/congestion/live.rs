@@ -63,18 +63,24 @@ impl LiveCC {
     }
 
     /// Update the packet send period based on configured limits.
+    ///
+    /// In live mode, rate-limiting is only applied when `max_bw` or `input_bw`
+    /// is explicitly configured. The peer's estimated link bandwidth is NOT used
+    /// as a rate limit — matching C++ libsrt behavior where live mode with
+    /// SRTO_MAXBW=0 sends at unlimited rate, relying on TSBPD drop instead.
     fn update_send_period(&mut self) {
         let max_bw = if self.max_bw > 0 {
             self.max_bw
         } else if self.input_bw > 0 {
             // Auto: input_bw * (1 + overhead%)
             self.input_bw * (100 + self.overhead_pct as i64) / 100
-        } else if self.bandwidth > 0 {
-            // Fallback: use estimated bandwidth
-            let bw = (self.bandwidth as f64 * self.avg_payload_size) as i64;
-            bw * (100 + self.overhead_pct as i64) / 100
         } else {
-            return; // No limit
+            // No explicit limit — send at unlimited rate (live mode default).
+            // Do NOT fall back to peer's estimated bandwidth, as it can be
+            // inaccurate (especially at connection start) and would throttle
+            // the sender below the input rate, causing buffer buildup.
+            self.pkt_send_period = 1.0;
+            return;
         };
 
         if max_bw > 0 && self.avg_payload_size > 0.0 {

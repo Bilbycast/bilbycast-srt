@@ -10,6 +10,7 @@
 //! transport-level resources (channel, addresses).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, mpsc, watch};
@@ -92,6 +93,19 @@ pub struct SrtConnection {
     /// Whether TSBPD base_time has been calibrated from the first data packet.
     pub tsbpd_calibrated: Mutex<bool>,
 
+    /// Set to true once the app calls recv(), indicating it is actively draining
+    /// the receive buffer without TSBPD timing. When true, the send_loop skips
+    /// drop_too_late to avoid racing with the app's recv() calls.
+    pub app_recv_active: AtomicBool,
+
+    /// Cached `recv_buf.ack_seq().value()`, updated atomically after every recv_buf mutation.
+    /// Allows send_loop to read ack_seq without locking recv_buf.
+    pub cached_ack_seq: AtomicI32,
+    /// Cached `recv_buf.len()`, updated atomically after every recv_buf mutation.
+    pub cached_recv_buf_len: AtomicUsize,
+    /// Cached `recv_buf.available()`, updated atomically after every recv_buf mutation.
+    pub cached_recv_buf_avail: AtomicUsize,
+
     /// Notify when data is available to read.
     pub recv_data_ready: Notify,
     /// Notify when send buffer has space.
@@ -165,6 +179,10 @@ impl SrtConnection {
             fec_arq_mode: Mutex::new(ArqMode::Always),
             fec_uncoverable: Mutex::new(Vec::new()),
             tsbpd_calibrated: Mutex::new(false),
+            app_recv_active: AtomicBool::new(false),
+            cached_ack_seq: AtomicI32::new(initial_seq.value()),
+            cached_recv_buf_len: AtomicUsize::new(0),
+            cached_recv_buf_avail: AtomicUsize::new(recv_buf_pkts),
             recv_data_ready: Notify::new(),
             send_space_ready: Notify::new(),
             state_watch: state_tx,
@@ -197,10 +215,21 @@ impl SrtConnection {
         self.state.lock().await.is_active()
     }
 
+    /// Update the atomic recv_buf cache. Must be called while holding recv_buf lock.
+    pub fn update_recv_buf_cache(&self, recv_buf: &ReceiveBuffer) {
+        self.cached_ack_seq.store(recv_buf.ack_seq().value(), Ordering::Release);
+        self.cached_recv_buf_len.store(recv_buf.len(), Ordering::Release);
+        self.cached_recv_buf_avail.store(recv_buf.available(), Ordering::Release);
+    }
+
     /// Set the peer's Initial Sequence Number (ISN) on the receive buffer
     /// and ACK state. Must be called after handshake, before data flows.
     pub async fn set_peer_isn(&self, isn: SeqNo) {
-        self.recv_buf.lock().await.set_start_seq(isn);
+        {
+            let mut recv_buf = self.recv_buf.lock().await;
+            recv_buf.set_start_seq(isn);
+            self.update_recv_buf_cache(&recv_buf);
+        }
         *self.ack_state.lock().await = AckState::new(isn);
         *self.highest_recv_seq.lock().await = isn;
         self.recv_loss_list.lock().await.clear();

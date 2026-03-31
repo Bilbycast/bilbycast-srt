@@ -11,6 +11,7 @@
 //! Also handles retransmission of lost packets and periodic control.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -308,11 +309,14 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
         }
     }
 
-    // Update stats with current RTT, uptime, and snapshot fields
+    // Update stats with current RTT, uptime, and snapshot fields.
+    // recv_buf stats are read from atomics to avoid locking recv_buf here —
+    // recv_loop updates these after every mutation, so they're always fresh.
     {
         let cc = conn.cc.lock().await;
         let send_buf = conn.send_buf.lock().await;
-        let recv_buf = conn.recv_buf.lock().await;
+        let recv_buf_len = conn.cached_recv_buf_len.load(Ordering::Acquire);
+        let recv_buf_avail = conn.cached_recv_buf_avail.load(Ordering::Acquire);
         let tsbpd = conn.tsbpd.lock().await;
         let peer_flow_window = *conn.peer_flow_window.lock().await;
 
@@ -343,13 +347,13 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
 
         // Buffer availability
         stats.byte_avail_snd_buf = ((send_buf.max_packets() - send_buf.len()) * max_payload) as i32;
-        stats.byte_avail_rcv_buf = (recv_buf.available() * max_payload) as i32;
+        stats.byte_avail_rcv_buf = (recv_buf_avail * max_payload) as i32;
 
         // Buffer occupancy
         stats.pkt_snd_buf = send_buf.len() as i32;
         stats.byte_snd_buf = (send_buf.len() * max_payload) as i32;
-        stats.pkt_rcv_buf = recv_buf.len() as i32;
-        stats.byte_rcv_buf = (recv_buf.len() * max_payload) as i32;
+        stats.pkt_rcv_buf = recv_buf_len as i32;
+        stats.byte_rcv_buf = (recv_buf_len * max_payload) as i32;
 
         // TSBPD delay
         stats.ms_rcv_tsbpd_delay = tsbpd.delay().as_millis() as i32;
@@ -365,8 +369,8 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
         if let Some(peer_addr) = *conn.peer_addr.lock().await {
             let dest_socket_id = *conn.peer_socket_id.lock().await;
 
-            // Get the last contiguous received sequence and ACK sequence number.
-            let ack_seq = conn.recv_buf.lock().await.ack_seq();
+            // Get the last contiguous received sequence from atomic cache (lock-free).
+            let ack_seq = SeqNo::new(conn.cached_ack_seq.load(Ordering::Acquire));
             let mut ack_state = conn.ack_state.lock().await;
             let ack_number = ack_state.next_ack_seq_no();
             ack_state.update_ack(ack_seq);
@@ -387,8 +391,8 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
                 ack_seq,
                 rtt: Some(timers.srtt),
                 rtt_var: Some(timers.rttvar),
-                recv_buf_size: Some(conn.config.recv_buffer_size as i32),
-                flow_window: Some(conn.config.flight_flag_size as i32),
+                available_buf_size: Some(conn.config.flight_flag_size as i32),
+                recv_speed_pkts: None,
                 bandwidth,
                 recv_rate,
             };
@@ -487,15 +491,20 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
         }
     }
 
-    // Too-late-to-play drop: periodically drop packets that missed their TSBPD deadline
-    {
+    // Too-late-to-play drop: periodically drop packets that missed their TSBPD deadline.
+    // Skip when the app is actively calling recv() (which bypasses TSBPD timing) —
+    // dropping packets the app hasn't had a chance to read causes decode errors.
+    if !conn.app_recv_active.load(std::sync::atomic::Ordering::Relaxed) {
         let tsbpd = conn.tsbpd.lock().await;
-        let dropped = conn.recv_buf.lock().await.drop_too_late(&tsbpd);
+        let mut recv_buf = conn.recv_buf.lock().await;
+        let dropped = recv_buf.drop_too_late(&tsbpd);
         if dropped > 0 {
-            // Clear dropped entries from receive loss list
-            conn.recv_loss_list.lock().await.acknowledge(
-                conn.recv_buf.lock().await.ack_seq()
-            );
+            conn.update_recv_buf_cache(&recv_buf);
+            drop(tsbpd);
+            drop(recv_buf);
+            // Clear dropped entries from receive loss list (use cached ack_seq)
+            let ack = SeqNo::new(conn.cached_ack_seq.load(Ordering::Acquire));
+            conn.recv_loss_list.lock().await.acknowledge(ack);
             let drop_bytes = dropped as u64 * conn.config.max_payload_size() as u64;
             let mut stats = conn.stats.lock().await;
             stats.pkt_rcv_drop += dropped as i32;

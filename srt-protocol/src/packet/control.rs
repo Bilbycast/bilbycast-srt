@@ -85,6 +85,9 @@ impl SrtExtType {
 /// Acknowledgement packet data.
 ///
 /// Sent periodically from receiver to sender to indicate successful reception.
+/// Field order matches SRT spec (ACKD_* indices in libsrt):
+///   0: Last ACK Seq No, 1: RTT, 2: RTT Var, 3: Available Buffer Size (packets),
+///   4: Packets Receiving Rate, 5: Estimated Link Capacity, 6: Receiving Rate (bytes/s)
 #[derive(Debug, Clone)]
 pub struct AckData {
     /// The sequence number up to which all packets have been received.
@@ -93,13 +96,15 @@ pub struct AckData {
     pub rtt: Option<i32>,
     /// RTT variance in microseconds.
     pub rtt_var: Option<i32>,
-    /// Available receiver buffer size in bytes.
-    pub recv_buf_size: Option<i32>,
-    /// Advertised flow window size in packets.
-    pub flow_window: Option<i32>,
-    /// Estimated link bandwidth in packets per second.
+    /// ACKD_BUFFERLEFT: Available receiver buffer size in packets.
+    /// This is the peer's advertised flow window — used by the sender
+    /// to gate how many packets can be in flight.
+    pub available_buf_size: Option<i32>,
+    /// ACKD_RCVSPEED: Packets receiving rate (packets per second).
+    pub recv_speed_pkts: Option<i32>,
+    /// ACKD_BANDWIDTH: Estimated link bandwidth in packets per second.
     pub bandwidth: Option<i32>,
-    /// Receiving rate in bytes per second.
+    /// ACKD_RCVRATE: Receiving rate in bytes per second.
     pub recv_rate: Option<i32>,
 }
 
@@ -114,11 +119,11 @@ impl AckData {
         if let Some(rtt) = self.rtt {
             buf.put_i32(rtt);
             buf.put_i32(self.rtt_var.unwrap_or(0));
-            buf.put_i32(self.recv_buf_size.unwrap_or(0));
-            buf.put_i32(self.flow_window.unwrap_or(0));
-            buf.put_i32(self.bandwidth.unwrap_or(0));
+            buf.put_i32(self.available_buf_size.unwrap_or(0)); // ACKD_BUFFERLEFT
+            buf.put_i32(self.recv_speed_pkts.unwrap_or(0));    // ACKD_RCVSPEED
+            buf.put_i32(self.bandwidth.unwrap_or(0));           // ACKD_BANDWIDTH
             if let Some(recv_rate) = self.recv_rate {
-                buf.put_i32(recv_rate);
+                buf.put_i32(recv_rate);                         // ACKD_RCVRATE
             }
         }
     }
@@ -129,14 +134,14 @@ impl AckData {
         }
         let mut buf = &data[..];
         let ack_seq = SeqNo::new(buf.get_i32());
-        let (rtt, rtt_var, recv_buf_size, flow_window, bandwidth, recv_rate) = if buf.remaining() >= 8 {
+        let (rtt, rtt_var, available_buf, recv_speed, bandwidth, recv_rate) = if buf.remaining() >= 8 {
             let rtt = buf.get_i32();
             let rtt_var = buf.get_i32();
-            let recv_buf = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };
-            let flow = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };
-            let bw = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };
-            let rr = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };
-            (Some(rtt), Some(rtt_var), recv_buf, flow, bw, rr)
+            let avail = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };  // ACKD_BUFFERLEFT
+            let speed = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };  // ACKD_RCVSPEED
+            let bw = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };     // ACKD_BANDWIDTH
+            let rr = if buf.remaining() >= 4 { Some(buf.get_i32()) } else { None };     // ACKD_RCVRATE
+            (Some(rtt), Some(rtt_var), avail, speed, bw, rr)
         } else {
             (None, None, None, None, None, None)
         };
@@ -145,8 +150,8 @@ impl AckData {
             ack_seq,
             rtt,
             rtt_var,
-            recv_buf_size,
-            flow_window,
+            available_buf_size: available_buf,
+            recv_speed_pkts: recv_speed,
             bandwidth,
             recv_rate,
         })

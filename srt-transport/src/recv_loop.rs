@@ -38,40 +38,57 @@ pub async fn run(mux: Arc<Multiplexer>) {
     let mut buf = vec![0u8; MAX_UDP_SIZE];
 
     loop {
-        match mux.channel.recv_from(&mut buf).await {
-            Ok((len, src_addr)) => {
-                if len < HEADER_SIZE {
-                    continue;
-                }
+        // Check shutdown flag on every iteration — allows the multiplexer
+        // to signal exit so the UDP socket Arc is released. This check is
+        // atomic (no lock) so it doesn't affect packet processing performance.
+        if mux.is_shutdown() {
+            log::debug!("recv_loop: shutdown signalled, exiting");
+            break;
+        }
 
-                let data = &buf[..len];
-                if let Some(packet) = SrtPacket::deserialize(data) {
-                    let dest_id = packet.dest_socket_id();
-                    log::trace!(
-                        "recv_loop: packet from {} dest_id={} ctrl={} type={:?} len={}",
-                        src_addr, dest_id, packet.is_control(),
-                        packet.control_type(), len
-                    );
+        // Use select! with a short timeout so we also exit promptly when
+        // no packets are arriving (idle listener after close).
+        let recv_result = tokio::select! {
+            r = mux.channel.recv_from(&mut buf) => Some(r),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => None,
+        };
 
-                    if let Some(conn) = mux.route(dest_id).await {
-                        process_packet(conn, packet, src_addr, &mux).await;
-                    } else {
-                        log::debug!(
-                            "recv_loop: no route for dest_id={} from {} (ctrl={}, type={:?})",
-                            dest_id, src_addr, packet.is_control(), packet.control_type()
-                        );
-                    }
-                } else {
-                    log::debug!("recv_loop: failed to deserialize packet ({} bytes) from {}", len, src_addr);
-                }
-            }
-            Err(e) => {
+        let (len, src_addr) = match recv_result {
+            Some(Ok((len, src_addr))) => (len, src_addr),
+            Some(Err(e)) => {
                 if is_fatal_error(&e) {
                     log::error!("Fatal receive error: {}", e);
                     break;
                 }
                 log::debug!("Transient receive error: {}", e);
+                continue;
             }
+            None => continue, // Timeout — loop back to check shutdown
+        };
+
+        if len < HEADER_SIZE {
+            continue;
+        }
+
+        let data = &buf[..len];
+        if let Some(packet) = SrtPacket::deserialize(data) {
+            let dest_id = packet.dest_socket_id();
+            log::trace!(
+                "recv_loop: packet from {} dest_id={} ctrl={} type={:?} len={}",
+                src_addr, dest_id, packet.is_control(),
+                packet.control_type(), len
+            );
+
+            if let Some(conn) = mux.route(dest_id).await {
+                process_packet(conn, packet, src_addr, &mux).await;
+            } else {
+                log::debug!(
+                    "recv_loop: no route for dest_id={} from {} (ctrl={}, type={:?})",
+                    dest_id, src_addr, packet.is_control(), packet.control_type()
+                );
+            }
+        } else {
+            log::debug!("recv_loop: failed to deserialize packet ({} bytes) from {}", len, src_addr);
         }
     }
 }
@@ -173,8 +190,8 @@ async fn process_ack(conn: &SrtConnection, packet: &SrtPacket, mux: &Multiplexer
     // Clear obsolete entries from send loss list
     conn.send_loss_list.lock().await.acknowledge(ack_data.ack_seq);
 
-    // Update peer's flow window from ACK
-    if let Some(fw) = ack_data.flow_window {
+    // Update peer's flow window from ACK (ACKD_BUFFERLEFT = available buffer in packets)
+    if let Some(fw) = ack_data.available_buf_size {
         *conn.peer_flow_window.lock().await = fw as u32;
     }
 
@@ -262,7 +279,12 @@ async fn process_ackack(conn: &SrtConnection, packet: &SrtPacket) {
 async fn process_dropreq(conn: &SrtConnection, packet: &SrtPacket) {
     let msg_id = packet.additional_info() as i32;
     if let Some(drop_req) = DropReqData::deserialize(msg_id, packet.payload()) {
-        let dropped = conn.recv_buf.lock().await.drop_range(drop_req.first_seq, drop_req.last_seq);
+        let dropped = {
+            let mut recv_buf = conn.recv_buf.lock().await;
+            let d = recv_buf.drop_range(drop_req.first_seq, drop_req.last_seq);
+            conn.update_recv_buf_cache(&recv_buf);
+            d
+        };
         // Clear these from loss list since sender says they're gone
         let count = SeqNo::offset(drop_req.first_seq, drop_req.last_seq) + 1;
         {
@@ -418,10 +440,12 @@ async fn process_data_packet(
     // Record packet arrival for bandwidth estimation
     conn.pkt_time_window.lock().await.on_pkt_arrival();
 
-    // Insert into receive buffer
+    // Insert into receive buffer and update highest received sequence
     {
         let mut recv_buf = conn.recv_buf.lock().await;
         recv_buf.insert(seq, msg_no, boundary, timestamp, in_order, data.clone());
+        recv_buf.update_highest_recv(seq);
+        conn.update_recv_buf_cache(&recv_buf);
     }
 
     // Feed to FEC decoder for group tracking and potential recovery
@@ -453,31 +477,61 @@ async fn process_data_packet(
 /// Process a received FEC packet.
 ///
 /// FEC packets are data packets with msgno=0 (SRT_MSGNO_CONTROL).
-/// They are NOT inserted into the receive buffer. Instead, they are
-/// fed to the FEC decoder which may recover lost data packets.
+/// They are fed to the FEC decoder which may recover lost data packets.
+/// A placeholder is inserted into the receive buffer at the FEC packet's
+/// sequence position so that `ack_seq()` counts it as received and
+/// `get_loss_list()` does not report it as missing. This matches libsrt
+/// behavior where FEC packets occupy receive buffer slots for ACK tracking.
 async fn process_fec_packet(conn: &SrtConnection, packet: &SrtPacket) {
     let seq = packet.sequence_number();
+    let timestamp = packet.timestamp();
     let fec_payload = packet.payload();
 
-    // Update FEC receive stats
+    // Insert FEC placeholder and update highest_recv — single lock hold.
+    {
+        let mut recv_buf = conn.recv_buf.lock().await;
+        recv_buf.insert_fec_placeholder(seq, timestamp);
+        recv_buf.update_highest_recv(seq);
+        conn.update_recv_buf_cache(&recv_buf);
+    }
+
+    // Gap tracking and stats — minimized lock holds.
+    let mut gap_loss: i32 = 0;
+    {
+        let mut highest = conn.highest_recv_seq.lock().await;
+        if seq.is_after(*highest) {
+            let expected = highest.increment();
+            if seq.is_after(expected) {
+                let gap_end = seq.add(-1);
+                gap_loss = SeqNo::offset(expected, gap_end) + 1;
+                conn.recv_loss_list.lock().await.insert_range(expected, gap_end);
+            }
+            *highest = seq;
+        } else {
+            conn.recv_loss_list.lock().await.remove(seq);
+        }
+    }
+    // Single stats update for FEC counter + any gap losses.
     {
         let mut stats = conn.stats.lock().await;
         stats.pkt_rcv_filter_extra += 1;
         stats.pkt_rcv_filter_extra_total += 1;
+        if gap_loss > 0 {
+            stats.pkt_rcv_loss += gap_loss;
+            stats.pkt_rcv_loss_total += gap_loss;
+        }
     }
 
-    // Feed to FEC decoder
+    // Feed to FEC decoder (the main computational work).
     let mut fec_dec = conn.fec_decoder.lock().await;
     if let Some(decoder) = fec_dec.as_mut() {
         let result = decoder.on_fec_packet(seq, fec_payload);
         drop(fec_dec);
 
-        // Inject recovered packets into receive buffer
         for pkt in result.recovered {
             inject_recovered_packet(conn, pkt).await;
         }
 
-        // Track uncoverable losses for ARQ OnReq mode
         if !result.uncoverable.is_empty() {
             let mut uncov = conn.fec_uncoverable.lock().await;
             uncov.extend(result.uncoverable);
@@ -509,6 +563,7 @@ async fn inject_recovered_packet(
             true,
             data,
         );
+        conn.update_recv_buf_cache(&recv_buf);
     }
 
     // Remove from loss list since we recovered it

@@ -374,10 +374,23 @@ impl SrtListener {
         self.local_addr
     }
 
-    /// Close the listener.
+    /// Close the listener and release the UDP port.
+    ///
+    /// Signals the multiplexer to shut down, which causes the recv_loop
+    /// and accept_loop background tasks to exit. Once those tasks drop
+    /// their Arc<Multiplexer> references, the UDP socket is released.
+    /// Close the listener and release the UDP port.
+    ///
+    /// Signals the multiplexer to shut down, which causes the recv_loop
+    /// and accept_loop background tasks to exit. Once those tasks drop
+    /// their Arc<Multiplexer> references, the UDP socket is released.
     pub async fn close(&self) -> Result<(), SrtError> {
         self.listener_conn.set_state(ConnectionState::Closed).await;
         self.multiplexer.clear_listener().await;
+        self.multiplexer.clear_all_routes().await;
+        // Signal shutdown — recv_loop exits on next iteration,
+        // dropping its Arc<Multiplexer> and releasing the UDP socket.
+        self.multiplexer.shutdown();
         Ok(())
     }
 }

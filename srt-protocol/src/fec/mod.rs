@@ -273,8 +273,12 @@ pub fn serialize_filter_extension(config: &str) -> Vec<u32> {
     let mut words = Vec::with_capacity(1 + size_words);
     // Extension header: type=Filter(7), size in words
     words.push((SRT_CMD_FILTER as u32) << 16 | size_words as u32);
+    // String-based extensions use little-endian u32 packing (HtoILA in libsrt).
+    // libsrt applies NtoHLA (ntohl) to the entire control packet payload on
+    // receive, then ItoHLA (le32toh) on string extensions to recover the bytes.
+    // By packing as LE here, the bytes survive the ntohl → le32toh roundtrip.
     for chunk in bytes.chunks(4) {
-        words.push(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        words.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     words
 }
@@ -282,10 +286,11 @@ pub fn serialize_filter_extension(config: &str) -> Vec<u32> {
 /// Parse a packet filter config string from handshake extension u32 words.
 ///
 /// The input is the data words (NOT including the extension header word).
+/// Words are in little-endian string encoding (matching libsrt's HtoILA/ItoHLA).
 pub fn parse_filter_extension(ext_data: &[u32]) -> String {
     let bytes: Vec<u8> = ext_data
         .iter()
-        .flat_map(|w| w.to_be_bytes())
+        .flat_map(|w| w.to_le_bytes())
         .collect();
     // Trim trailing null bytes (padding)
     let end = bytes.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
