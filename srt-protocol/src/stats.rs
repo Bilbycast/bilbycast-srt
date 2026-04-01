@@ -81,8 +81,10 @@ pub struct SrtStats {
     pub pkt_rcv_loss: i32,
     /// Retransmitted packets.
     pub pkt_retrans: i32,
-    /// Retransmitted packets received.
+    /// Retransmitted packets received (instant, reset on snapshot).
     pub pkt_rcv_retrans: i32,
+    /// Retransmitted packets received (cumulative).
+    pub pkt_rcv_retrans_total: i32,
     /// Sent ACK packets.
     pub pkt_sent_ack: i32,
     /// Received ACK packets.

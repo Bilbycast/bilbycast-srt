@@ -118,9 +118,13 @@ impl ReceiveBuffer {
 
         let pos = (self.start_pos + offset as usize) % self.capacity;
 
-        // Check for duplicate
-        if self.entries[pos].is_some() {
-            return false;
+        // Allow overwriting FEC placeholders (they occupy seq slots for ACK tracking
+        // but are not real data). Reject true duplicates (actual data already present).
+        if let Some(entry) = &self.entries[pos] {
+            if entry.state != SlotState::FecPlaceholder {
+                return false; // Real data already here — duplicate
+            }
+            // FEC placeholder — overwrite it with real data
         }
 
         self.entries[pos] = Some(ReceiveEntry {

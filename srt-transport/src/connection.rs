@@ -241,6 +241,7 @@ impl SrtConnection {
         *self.fec_arq_mode.lock().await = config.arq;
         *self.fec_encoder.lock().await = Some(FecEncoder::new(config.clone()));
         let base_seq = *self.highest_recv_seq.lock().await;
+        log::debug!("FEC decoder initialized: base_seq={}, config={}", base_seq.value(), config);
         *self.fec_decoder.lock().await = Some(FecDecoder::new(config, base_seq));
     }
 

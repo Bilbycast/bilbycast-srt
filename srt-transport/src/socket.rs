@@ -425,19 +425,20 @@ impl SrtSocket {
     /// Receive data from the SRT connection.
     ///
     /// Blocks until data is available or the connection is closed.
+    /// Delivers packets without TSBPD timing — the app drains as fast as
+    /// packets are available. The `app_recv_active` flag (Release/Acquire)
+    /// suppresses drop_too_late in the send loop to prevent races.
     pub async fn recv(&self) -> Result<Bytes, SrtError> {
-        // Signal that the app is actively draining — suppresses drop_too_late
-        // in send_loop to avoid racing with this read path.
         self.connection
             .app_recv_active
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Release);
 
         loop {
             if !self.connection.is_active().await {
                 return Err(SrtError::NoConnection);
             }
 
-            // Try to read from receive buffer
+            // Try to read from receive buffer (no TSBPD — drain immediately)
             {
                 let mut recv_buf = self.connection.recv_buf.lock().await;
                 if let Some(data) = recv_buf.read_message(None) {

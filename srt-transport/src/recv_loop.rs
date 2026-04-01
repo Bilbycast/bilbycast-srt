@@ -448,11 +448,13 @@ async fn process_data_packet(
         conn.update_recv_buf_cache(&recv_buf);
     }
 
-    // Feed to FEC decoder for group tracking and potential recovery
+    // Feed CIPHERTEXT to FEC decoder — C++ libsrt calls feedSource AFTER encryption,
+    // so FEC parity = XOR(ciphertexts). The receiver must also XOR ciphertexts to match.
+    // Recovered packets are ciphertext and need decryption in inject_recovered_packet.
     {
         let mut fec_dec = conn.fec_decoder.lock().await;
         if let Some(decoder) = fec_dec.as_mut() {
-            let recovered = decoder.on_data_packet(seq, timestamp, enc_key as u8, &data);
+            let recovered = decoder.on_data_packet(seq, timestamp, enc_key as u8, raw_payload);
             drop(fec_dec);
             for pkt in recovered {
                 inject_recovered_packet(conn, pkt).await;
@@ -467,6 +469,7 @@ async fn process_data_packet(
         stats.byte_recv_total += payload_len;
         if retransmitted {
             stats.pkt_rcv_retrans += 1;
+            stats.pkt_rcv_retrans_total += 1;
         }
     }
 

@@ -494,7 +494,7 @@ async fn send_periodic_control(mux: &Multiplexer, conn: &SrtConnection) {
     // Too-late-to-play drop: periodically drop packets that missed their TSBPD deadline.
     // Skip when the app is actively calling recv() (which bypasses TSBPD timing) —
     // dropping packets the app hasn't had a chance to read causes decode errors.
-    if !conn.app_recv_active.load(std::sync::atomic::Ordering::Relaxed) {
+    if !conn.app_recv_active.load(std::sync::atomic::Ordering::Acquire) {
         let tsbpd = conn.tsbpd.lock().await;
         let mut recv_buf = conn.recv_buf.lock().await;
         let dropped = recv_buf.drop_too_late(&tsbpd);

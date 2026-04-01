@@ -30,6 +30,7 @@ const DRIFT_SAMPLE_WINDOW: usize = 1000;
 /// relative timestamp (32-bit microsecond counter wrapping at ~71 min)
 /// and the receiver's local clock. Accounts for clock drift between
 /// sender and receiver.
+#[derive(Clone)]
 pub struct TsbpdTime {
     /// Base time: the local instant corresponding to sender timestamp 0.
     base_time: Instant,
@@ -132,6 +133,7 @@ impl TsbpdTime {
 ///
 /// Maintains a sliding window of drift samples and computes a smoothed
 /// correction value. Limits correction to prevent large jumps.
+#[derive(Clone)]
 struct DriftTracer {
     /// Accumulated drift samples.
     samples: Vec<i64>,
