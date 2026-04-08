@@ -1,5 +1,7 @@
 # bilbycast-srt - Pure Rust SRT Protocol Implementation
 
+> 🌐 Learn more at **[bilbycast.com](https://bilbycast.com)** — the official website for the Bilbycast broadcast media transport suite.
+
 A complete, pure-Rust implementation of the [SRT (Secure Reliable Transport)](https://github.com/Haivision/srt) protocol. This project provides the same functionality as the original Haivision C++ SRT library but compiles without any external system dependencies (no OpenSSL, no libssl, no libcrypto).
 
 ## Features
