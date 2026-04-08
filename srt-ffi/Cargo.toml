@@ -1,6 +1,6 @@
 [package]
 name = "srt-ffi"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "C FFI bindings for the SRT protocol"
 license = "MPL-2.0"
