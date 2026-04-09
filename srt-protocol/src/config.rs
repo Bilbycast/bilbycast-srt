@@ -358,8 +358,20 @@ impl SrtConfig {
     }
 
     /// Maximum payload that fits in a single SRT packet.
+    ///
+    /// In live mode (`payload_size > 0`), returns the configured payload size
+    /// capped by the MTU-derived limit. This ensures SRT messages respect the
+    /// application's payload size setting (e.g., 1316 bytes for MPEG-TS
+    /// interop with libsrt consumers) rather than always using the full
+    /// MTU-derived maximum (1456 bytes for MSS=1500).
     pub fn max_payload_size(&self) -> usize {
-        (self.mss as usize).saturating_sub(super::packet::header::UDP_HEADER_SIZE + super::packet::header::HEADER_SIZE)
+        let mtu_payload = (self.mss as usize)
+            .saturating_sub(super::packet::header::UDP_HEADER_SIZE + super::packet::header::HEADER_SIZE);
+        if self.payload_size > 0 {
+            (self.payload_size as usize).min(mtu_payload)
+        } else {
+            mtu_payload
+        }
     }
 
     /// Whether encryption is enabled.

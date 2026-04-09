@@ -1,36 +1,39 @@
 // Copyright (c) 2026 Reza Rahimi. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 
-// Copyright (c) 2026 Reza Rahimi. All rights reserved.
-// SPDX-License-Identifier: MPL-2.0
-
 //! SRT socket handle with builder pattern.
 //!
-//! Maps to C++ `CUDTSocket` + public API. Provides the main user-facing
-//! interface for SRT connections.
+//! Provides the main user-facing interface for SRT connections.
+//! Communicates with the [`ConnTask`](crate::conn_task::ConnTask)
+//! via channels — zero mutex acquisitions on send/recv hot paths.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
-use tokio::sync::watch;
+use bytes::Bytes;
+use tokio::sync::{mpsc, watch, Notify};
 
 use srt_protocol::config::{CryptoModeConfig, KeySize, SrtConfig, SocketStatus};
+use srt_protocol::crypto::CryptoControl;
 use srt_protocol::error::SrtError;
-use srt_protocol::packet::SrtPacket;
-use srt_protocol::packet::control::ControlType;
-use srt_protocol::packet::header::HEADER_SIZE;
-use srt_protocol::protocol::connection::ConnectionState;
+use srt_protocol::fec::ArqMode;
+use srt_protocol::fec::decoder::FecDecoder;
+use srt_protocol::fec::encoder::FecEncoder;
 use srt_protocol::stats::SrtStats;
 
 use crate::channel::UdpChannel;
+use crate::conn_task::ConnTask;
 use crate::connection::SrtConnection;
 use crate::connector;
 use crate::connector_rendezvous;
 use crate::multiplexer::Multiplexer;
 use crate::recv_loop;
-use crate::send_loop;
+
+/// Bounded capacity for the app → ConnTask send channel.
+const APP_SEND_CAPACITY: usize = 64;
+/// Bounded capacity for the ConnTask → app receive channel.
+const APP_RECV_CAPACITY: usize = 256;
 
 /// Builder for configuring and creating SRT sockets.
 pub struct SrtSocketBuilder {
@@ -147,37 +150,24 @@ impl SrtSocketBuilder {
     }
 
     /// Set the maximum retransmission bandwidth in bytes per second.
-    ///
-    /// Uses a token bucket shaper to limit retransmission bandwidth,
-    /// preventing retransmissions from starving new data on lossy links.
-    /// - `-1` (default): unlimited retransmission bandwidth
-    /// - `0`: disable retransmissions entirely
-    /// - `> 0`: limit to this many bytes per second
     pub fn max_rexmit_bw(mut self, bw: i64) -> Self {
         self.config.max_rexmit_bw = bw;
         self
     }
 
     /// Set the SRT packet filter configuration string.
-    ///
-    /// Enables FEC (Forward Error Correction) on this connection.
-    /// Format: `"fec,cols:10,rows:5,layout:staircase,arq:onreq"`
-    ///
-    /// Both sides must agree on the FEC parameters during handshake.
     pub fn packet_filter(mut self, filter: String) -> Self {
         self.config.packet_filter = filter;
         self
     }
 
     /// Set the maximum bandwidth in bytes per second.
-    /// 0 = unlimited (default). Limits total send rate including retransmissions.
     pub fn max_bw(mut self, bw: i64) -> Self {
         self.config.max_bw = bw;
         self
     }
 
     /// Set the estimated input bandwidth in bytes per second.
-    /// Helps congestion control estimate the send rate. 0 = auto-detect.
     pub fn input_bw(mut self, bw: i64) -> Self {
         self.config.input_bw = bw;
         self
@@ -232,8 +222,6 @@ impl SrtSocketBuilder {
     }
 
     /// Enable or disable too-late packet drop in live mode.
-    /// When enabled (default for live mode), packets that arrive after their
-    /// TSBPD delivery deadline are dropped. Disable for recording/archival.
     pub fn tlpkt_drop(mut self, enabled: bool) -> Self {
         self.config.tlpkt_drop = enabled;
         self
@@ -246,8 +234,6 @@ impl SrtSocketBuilder {
     }
 
     /// Enable or disable rendezvous mode.
-    /// In rendezvous mode, both peers simultaneously connect to each other
-    /// (no caller/listener distinction). Use `connect_rendezvous()` to connect.
     pub fn rendezvous(mut self, enabled: bool) -> Self {
         self.config.rendezvous = enabled;
         self
@@ -270,61 +256,90 @@ impl SrtSocketBuilder {
 
         let mux = Arc::new(Multiplexer::new(channel));
         let socket_id = rand::random::<u32>() & 0x3FFF_FFFF;
-        let conn = Arc::new(SrtConnection::new(self.config, local_addr, socket_id));
 
+        // Initialize crypto from config
+        let initial_crypto = init_crypto(&self.config);
+
+        // Create thin connection handle for routing
+        let (conn, net_rx) = SrtConnection::new(self.config.clone(), local_addr, socket_id);
+        let conn = Arc::new(conn);
         mux.add_connection(socket_id, conn.clone()).await;
 
-        // Start send/receive loops
+        // Spawn recv_loop
         let mux_recv = mux.clone();
-        tokio::spawn(async move {
-            recv_loop::run(mux_recv).await;
-        });
-
-        let mux_send = mux.clone();
-        let conn_send = conn.clone();
-        tokio::spawn(async move {
-            send_loop::run(mux_send, conn_send).await;
-        });
+        tokio::spawn(async move { recv_loop::run(mux_recv).await; });
 
         // Perform handshake
-        connector::connect(mux.clone(), conn.clone(), addr).await?;
+        let hs_result = {
+            let mut hs_rx = conn.handshake_rx.lock().await;
+            connector::connect(
+                &mux, &self.config, socket_id,
+                &conn.state_watch, initial_crypto,
+                &mut hs_rx, addr,
+            ).await?
+        };
 
-        let state_rx = conn.state_watch.subscribe();
+        // Build and spawn ConnTask
+        let (app_send_tx, app_data_rx) = mpsc::channel(APP_SEND_CAPACITY);
+        let (app_recv_tx, app_recv_rx) = mpsc::channel(APP_RECV_CAPACITY);
+        let (state_tx, state_rx) = watch::channel(SocketStatus::Connected);
+        let (stats_tx, stats_rx) = watch::channel(SrtStats::default());
+        let close_signal = Arc::new(Notify::new());
+
+        // Build FEC encoder/decoder
+        let (fec_encoder, fec_decoder, fec_arq_mode) = if let Some(ref fc) = hs_result.fec_config {
+            (
+                Some(FecEncoder::new(fc.clone())),
+                Some(FecDecoder::new(fc.clone(), hs_result.peer_isn)),
+                fc.arq,
+            )
+        } else {
+            (None, None, ArqMode::Always)
+        };
+
+        let conn_task = ConnTask::new(
+            self.config.clone(),
+            conn.start_time,
+            socket_id,
+            hs_result.peer_addr,
+            hs_result.peer_socket_id,
+            hs_result.peer_isn,
+            srt_protocol::packet::seq::SeqNo::new(0), // own ISN
+            hs_result.crypto,
+            fec_encoder,
+            fec_decoder,
+            fec_arq_mode,
+            hs_result.tsbpd_base_time,
+            mux.clone(),
+            net_rx,
+            app_data_rx,
+            app_recv_tx,
+            state_tx.clone(),
+            stats_tx,
+            close_signal.clone(),
+        );
+        tokio::spawn(conn_task.run());
 
         Ok(SrtSocket {
-            connection: conn,
+            config: Arc::new(self.config),
+            local_addr,
+            peer_addr: Some(hs_result.peer_addr),
+            socket_id,
             multiplexer: mux,
+            app_send_tx,
+            app_recv_rx: tokio::sync::Mutex::new(app_recv_rx),
             state_rx,
+            stats_rx,
+            close_signal,
         })
     }
 
     /// Connect in rendezvous mode (peer-to-peer, no caller/listener).
-    ///
-    /// Both sides must call this simultaneously with each other's address.
-    /// The `local_addr` must have a specific port (not 0) since both peers
-    /// need to know each other's port in advance.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// use srt_transport::SrtSocket;
-    ///
-    /// let socket = SrtSocket::builder()
-    ///     .rendezvous(true)
-    ///     .connect_rendezvous(
-    ///         "0.0.0.0:5000".parse()?,  // local bind address
-    ///         "192.168.1.2:5000".parse()?,  // remote peer address
-    ///     )
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn connect_rendezvous(
         self,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Result<SrtSocket, SrtError> {
-        // Rendezvous requires a specific local port (both sides must know each other's port)
         if local_addr.port() == 0 {
             return Err(SrtError::ConnectionSetup);
         }
@@ -335,38 +350,81 @@ impl SrtSocketBuilder {
 
         let mux = Arc::new(Multiplexer::new(channel));
         let socket_id = rand::random::<u32>() & 0x3FFF_FFFF;
-        let conn = Arc::new(SrtConnection::new(self.config, actual_local, socket_id));
 
-        // Register in both the routing table (for packets addressed to our socket_id)
-        // and as the rendezvous connection (for packets addressed to dest_socket_id=0)
+        let initial_crypto = init_crypto(&self.config);
+
+        let (conn, net_rx) = SrtConnection::new(self.config.clone(), actual_local, socket_id);
+        let conn = Arc::new(conn);
         mux.add_connection(socket_id, conn.clone()).await;
         mux.set_rendezvous(conn.clone()).await;
 
-        // Start send/receive loops
+        // Spawn recv_loop
         let mux_recv = mux.clone();
-        tokio::spawn(async move {
-            recv_loop::run(mux_recv).await;
-        });
-
-        let mux_send = mux.clone();
-        let conn_send = conn.clone();
-        tokio::spawn(async move {
-            send_loop::run(mux_send, conn_send).await;
-        });
+        tokio::spawn(async move { recv_loop::run(mux_recv).await; });
 
         // Perform rendezvous handshake
-        connector_rendezvous::connect_rendezvous(mux.clone(), conn.clone(), remote_addr).await?;
+        let hs_result = {
+            let mut hs_rx = conn.handshake_rx.lock().await;
+            connector_rendezvous::connect_rendezvous(
+                &mux, &self.config, socket_id,
+                &conn.state_watch, initial_crypto,
+                &mut hs_rx, remote_addr,
+            ).await?
+        };
 
-        // Handshake complete — clean up rendezvous routing
-        // (all subsequent packets will be addressed to our socket_id)
         mux.clear_rendezvous().await;
 
-        let state_rx = conn.state_watch.subscribe();
+        // Build and spawn ConnTask
+        let (app_send_tx, app_data_rx) = mpsc::channel(APP_SEND_CAPACITY);
+        let (app_recv_tx, app_recv_rx) = mpsc::channel(APP_RECV_CAPACITY);
+        let (state_tx, state_rx) = watch::channel(SocketStatus::Connected);
+        let (stats_tx, stats_rx) = watch::channel(SrtStats::default());
+        let close_signal = Arc::new(Notify::new());
+
+        let (fec_encoder, fec_decoder, fec_arq_mode) = if let Some(ref fc) = hs_result.fec_config {
+            (
+                Some(FecEncoder::new(fc.clone())),
+                Some(FecDecoder::new(fc.clone(), hs_result.peer_isn)),
+                fc.arq,
+            )
+        } else {
+            (None, None, ArqMode::Always)
+        };
+
+        let conn_task = ConnTask::new(
+            self.config.clone(),
+            conn.start_time,
+            socket_id,
+            hs_result.peer_addr,
+            hs_result.peer_socket_id,
+            hs_result.peer_isn,
+            srt_protocol::packet::seq::SeqNo::new(0),
+            hs_result.crypto,
+            fec_encoder,
+            fec_decoder,
+            fec_arq_mode,
+            hs_result.tsbpd_base_time,
+            mux.clone(),
+            net_rx,
+            app_data_rx,
+            app_recv_tx,
+            state_tx.clone(),
+            stats_tx,
+            close_signal.clone(),
+        );
+        tokio::spawn(conn_task.run());
 
         Ok(SrtSocket {
-            connection: conn,
+            config: Arc::new(self.config),
+            local_addr: actual_local,
+            peer_addr: Some(hs_result.peer_addr),
+            socket_id,
             multiplexer: mux,
+            app_send_tx,
+            app_recv_rx: tokio::sync::Mutex::new(app_recv_rx),
             state_rx,
+            stats_rx,
+            close_signal,
         })
     }
 }
@@ -379,15 +437,31 @@ impl Default for SrtSocketBuilder {
 
 /// An established SRT socket.
 ///
-/// Provides async send/recv operations over an SRT connection.
+/// Communicates with the connection task via channels.
 /// Implements RAII: dropping the socket closes the connection.
 pub struct SrtSocket {
-    /// The underlying connection state.
-    pub(crate) connection: Arc<SrtConnection>,
-    /// The multiplexer for packet I/O.
+    /// Connection configuration (read-only).
+    config: Arc<SrtConfig>,
+    /// Local socket address.
+    local_addr: SocketAddr,
+    /// Peer address (set once after handshake).
+    peer_addr: Option<SocketAddr>,
+    /// Socket ID.
+    #[allow(dead_code)]
+    socket_id: u32,
+    /// The multiplexer (kept alive for the recv_loop).
+    #[allow(dead_code)]
     pub(crate) multiplexer: Arc<Multiplexer>,
+    /// Channel to push data to the connection task.
+    app_send_tx: mpsc::Sender<Bytes>,
+    /// Channel to receive data from the connection task.
+    app_recv_rx: tokio::sync::Mutex<mpsc::Receiver<Bytes>>,
     /// Watch receiver for state changes.
     state_rx: watch::Receiver<SocketStatus>,
+    /// Watch receiver for statistics.
+    stats_rx: watch::Receiver<SrtStats>,
+    /// Signal to initiate graceful close.
+    close_signal: Arc<Notify>,
 }
 
 impl SrtSocket {
@@ -396,28 +470,48 @@ impl SrtSocket {
         SrtSocketBuilder::new()
     }
 
-    /// Create a socket from an existing connection (used by listener accept).
+    /// Create a socket from pre-built channels (used by listener accept).
     pub(crate) fn new(
-        connection: Arc<SrtConnection>,
+        config: Arc<SrtConfig>,
+        local_addr: SocketAddr,
+        peer_addr: Option<SocketAddr>,
+        socket_id: u32,
         multiplexer: Arc<Multiplexer>,
+        app_send_tx: mpsc::Sender<Bytes>,
+        app_recv_rx: mpsc::Receiver<Bytes>,
         state_rx: watch::Receiver<SocketStatus>,
+        stats_rx: watch::Receiver<SrtStats>,
+        close_signal: Arc<Notify>,
     ) -> Self {
         Self {
-            connection,
+            config,
+            local_addr,
+            peer_addr,
+            socket_id,
             multiplexer,
+            app_send_tx,
+            app_recv_rx: tokio::sync::Mutex::new(app_recv_rx),
             state_rx,
+            stats_rx,
+            close_signal,
         }
     }
 
     /// Send data over the SRT connection.
+    ///
+    /// Blocks asynchronously when the send buffer is full, providing
+    /// natural backpressure via the bounded channel to the connection task.
     pub async fn send(&self, data: &[u8]) -> Result<usize, SrtError> {
-        if !self.connection.is_active().await {
+        if *self.state_rx.borrow() == SocketStatus::Broken
+            || *self.state_rx.borrow() == SocketStatus::Closed
+        {
             return Err(SrtError::NoConnection);
         }
 
-        let mut send_buf = self.connection.send_buf.lock().await;
-        send_buf.add_message(data, -1, false);
-        self.connection.send_space_ready.notify_one();
+        self.app_send_tx
+            .send(Bytes::copy_from_slice(data))
+            .await
+            .map_err(|_| SrtError::NoConnection)?;
 
         Ok(data.len())
     }
@@ -425,54 +519,32 @@ impl SrtSocket {
     /// Receive data from the SRT connection.
     ///
     /// Blocks until data is available or the connection is closed.
-    /// Delivers packets without TSBPD timing — the app drains as fast as
-    /// packets are available. The `app_recv_active` flag (Release/Acquire)
-    /// suppresses drop_too_late in the send loop to prevent races.
     pub async fn recv(&self) -> Result<Bytes, SrtError> {
-        self.connection
-            .app_recv_active
-            .store(true, std::sync::atomic::Ordering::Release);
-
-        loop {
-            if !self.connection.is_active().await {
-                return Err(SrtError::NoConnection);
-            }
-
-            // Try to read from receive buffer (no TSBPD — drain immediately)
-            {
-                let mut recv_buf = self.connection.recv_buf.lock().await;
-                if let Some(data) = recv_buf.read_message(None) {
-                    self.connection.update_recv_buf_cache(&recv_buf);
-                    return Ok(data);
-                }
-            }
-
-            // Wait for data
-            self.connection.recv_data_ready.notified().await;
+        let mut rx = self.app_recv_rx.lock().await;
+        match rx.recv().await {
+            Some(data) => Ok(data),
+            None => Err(SrtError::NoConnection),
         }
     }
 
     /// Get the local address.
     pub fn local_addr(&self) -> SocketAddr {
-        self.connection.local_addr
+        self.local_addr
     }
 
     /// Get the peer address.
     pub async fn peer_addr(&self) -> Option<SocketAddr> {
-        *self.connection.peer_addr.lock().await
+        self.peer_addr
     }
 
     /// Get the Stream ID for this connection.
-    ///
-    /// For accepted sockets (listener side), this is the Stream ID sent by the caller.
-    /// For caller sockets, this is the Stream ID set via the builder.
     pub fn stream_id(&self) -> &str {
-        &self.connection.config.stream_id
+        &self.config.stream_id
     }
 
     /// Get connection statistics.
     pub async fn stats(&self) -> SrtStats {
-        self.connection.stats.lock().await.clone()
+        self.stats_rx.borrow().clone()
     }
 
     /// Get the current socket status.
@@ -490,45 +562,52 @@ impl SrtSocket {
     }
 
     /// Close the connection gracefully.
-    ///
-    /// Sends a SHUTDOWN control packet to the peer so it knows we're closing,
-    /// then waits briefly for pending data to drain before cleaning up.
     pub async fn close(&self) -> Result<(), SrtError> {
-        self.connection.set_state(ConnectionState::Closing).await;
+        self.close_signal.notify_one();
 
-        // Send SHUTDOWN control packet to peer
-        if let Some(peer_addr) = *self.connection.peer_addr.lock().await {
-            let dest_socket_id = *self.connection.peer_socket_id.lock().await;
-            let shutdown = SrtPacket::new_control(
-                ControlType::Shutdown,
-                0,
-                0,
-                0,
-                dest_socket_id,
-                Bytes::new(),
-            );
-            let mut buf = BytesMut::with_capacity(HEADER_SIZE);
-            shutdown.serialize(&mut buf);
-            let _ = self.multiplexer.send_to(&buf, peer_addr).await;
-        }
-
-        // Brief drain period: allow in-flight retransmissions to complete.
-        // The linger timeout controls how long we wait (capped at 1s for graceful close).
-        if let Some(linger) = self.connection.config.linger {
-            if !linger.is_zero() {
-                tokio::time::sleep(linger.min(Duration::from_secs(1))).await;
+        // Wait for the connection task to reach Closed state
+        let mut state_rx = self.state_rx.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = *state_rx.borrow();
+            if status == SocketStatus::Closed || status == SocketStatus::Broken {
+                break;
+            }
+            tokio::select! {
+                result = state_rx.changed() => {
+                    if result.is_err() { break; }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    break;
+                }
             }
         }
 
-        self.connection.set_state(ConnectionState::Closed).await;
-        self.multiplexer.remove_connection(self.connection.socket_id).await;
         Ok(())
     }
 }
 
 impl Drop for SrtSocket {
     fn drop(&mut self) {
-        // Mark as closed — actual cleanup happens async
-        // The tokio tasks will detect the closed state and stop
+        // Signal close — ConnTask will detect and clean up
+        self.close_signal.notify_one();
+    }
+}
+
+/// Initialize crypto state from config.
+fn init_crypto(config: &SrtConfig) -> Option<CryptoControl> {
+    if config.encryption_enabled() {
+        use srt_protocol::crypto::key_material;
+        let salt = key_material::generate_salt();
+        let kek = key_material::derive_kek(&config.passphrase, &salt, config.key_size);
+        let sek = key_material::generate_sek(config.key_size);
+
+        let mut cc = CryptoControl::new(config.key_size, config.crypto_mode.into());
+        cc.kek = Some(kek);
+        cc.salt = salt;
+        cc.keys.set_key(srt_protocol::crypto::KeyIndex::Even, sek);
+        Some(cc)
+    } else {
+        None
     }
 }

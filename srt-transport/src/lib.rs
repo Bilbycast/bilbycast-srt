@@ -1,9 +1,6 @@
 // Copyright (c) 2026 Reza Rahimi. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 
-// Copyright (c) 2026 Reza Rahimi. All rights reserved.
-// SPDX-License-Identifier: MPL-2.0
-
 //! Async I/O transport layer for the SRT protocol.
 //!
 //! This crate provides ready-to-use [`SrtSocket`] and [`SrtListener`] types
@@ -36,9 +33,10 @@
 //!
 //! # Architecture
 //!
-//! Each SRT connection spawns two tokio tasks:
-//! - [`send_loop`] - Paces outgoing packets according to congestion control
-//! - [`recv_loop`] - Receives and dispatches incoming UDP packets
+//! Each SRT connection is driven by a single [`conn_task`] that owns all
+//! mutable protocol state (zero Mutex on the data path). The recv_loop
+//! feeds parsed network events via an unbounded mpsc channel; the app
+//! communicates via bounded mpsc channels for send/recv.
 //!
 //! Multiple connections can share a single UDP port via the [`multiplexer`],
 //! which routes packets by destination socket ID.
@@ -47,16 +45,18 @@
 //!
 //! - [`socket`] - `SrtSocket` and `SrtSocketBuilder` (main client API)
 //! - [`listener`] - `SrtListener` for accepting incoming connections
+//! - [`conn_task`] - Single-owner connection task (protocol engine)
 //! - [`connector`] - HSv5 caller-side handshake implementation
 //! - [`connector_rendezvous`] - HSv5 rendezvous (peer-to-peer) handshake
 //! - [`channel`] - UDP channel wrapper over `tokio::net::UdpSocket`
 //! - [`multiplexer`] - Routes packets across connections on one UDP port
-//! - [`connection`] - Internal connection state (protocol + transport)
-//! - [`send_loop`] / [`recv_loop`] - Async send/receive tasks
+//! - [`connection`] - Thin routing handle (config + channels)
+//! - [`recv_loop`] - Stateless async receive loop (parse + route)
 //! - [`epoll`] - Event notification for socket multiplexing
 //! - [`manager`] - Global socket registry
 
 pub mod channel;
+pub mod conn_task;
 pub mod connection;
 pub mod connector;
 pub mod connector_rendezvous;
@@ -65,7 +65,6 @@ pub mod listener;
 pub mod manager;
 pub mod multiplexer;
 pub mod recv_loop;
-pub mod send_loop;
 pub mod socket;
 
 pub use srt_protocol;

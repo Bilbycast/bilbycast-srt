@@ -29,7 +29,21 @@ pub struct SendBufferEntry {
     pub msg_no: MsgNo,
     /// Packet boundary (Solo, First, Subsequent, Last).
     pub boundary: PacketBoundary,
-    /// Timestamp when this packet was first sent.
+    /// Wall-clock instant at which this packet was queued in the send
+    /// buffer. Used for the time-to-live (TTL) drop check and for
+    /// initialising [`origin_time`] before the packet is first sent.
+    pub queue_time: Instant,
+    /// Wall-clock instant at which this packet was first handed to
+    /// `mux.send_to`. Set on the first call to [`SendBuffer::next_packet`]
+    /// and re-used for retransmissions, so the SRT data packet timestamp
+    /// (`origin_time - conn.start_time`) reflects the actual moment the
+    /// packet hit the wire — matching what libsrt's TSBPD drift tracer
+    /// expects (Bug B in the 2026-04-09 test report).
+    ///
+    /// Before the first send this field equals `queue_time`. After the
+    /// first send it never changes (so retransmissions of the same
+    /// `seq_no` carry the same wire timestamp as the original send,
+    /// per the SRT live-mode spec).
     pub origin_time: Instant,
     /// Whether in-order delivery is required.
     pub in_order: bool,
@@ -108,6 +122,7 @@ impl SendBuffer {
                 seq_no: self.next_seq,
                 msg_no,
                 boundary: PacketBoundary::Solo,
+                queue_time: now,
                 origin_time: now,
                 in_order,
                 msg_ttl: ttl,
@@ -138,6 +153,7 @@ impl SendBuffer {
                     seq_no: self.next_seq,
                     msg_no,
                     boundary,
+                    queue_time: now,
                     origin_time: now,
                     in_order,
                     msg_ttl: ttl,
@@ -153,13 +169,18 @@ impl SendBuffer {
 
     /// Get the next unsent packet and advance the cursor.
     /// The packet remains in the buffer for potential retransmission.
-    /// Returns a clone of the entry (with send_count incremented).
+    /// Returns a clone of the entry (with `send_count` incremented and
+    /// `origin_time` stamped at the moment of first dispatch — see the
+    /// `origin_time` field doc for the rationale). Retransmissions
+    /// reuse this same `origin_time` so the SRT data packet timestamp
+    /// is identical on every wire copy of the same `seq_no`.
     pub fn next_packet(&mut self) -> Option<SendBufferEntry> {
         if self.send_cursor >= self.entries.len() {
             return None;
         }
         let entry = &mut self.entries[self.send_cursor];
         entry.send_count += 1;
+        entry.origin_time = Instant::now();
         let result = entry.clone();
         self.send_cursor += 1;
         Some(result)
@@ -270,7 +291,7 @@ impl SendBuffer {
             if e.msg_ttl < 0 {
                 return false; // kept, no adjustment
             }
-            let elapsed = now.duration_since(e.origin_time);
+            let elapsed = now.duration_since(e.queue_time);
             elapsed.as_millis() > e.msg_ttl as u128
         }).count();
 
@@ -278,7 +299,7 @@ impl SendBuffer {
             if e.msg_ttl < 0 {
                 return true; // No TTL
             }
-            let elapsed = now.duration_since(e.origin_time);
+            let elapsed = now.duration_since(e.queue_time);
             elapsed.as_millis() <= e.msg_ttl as u128
         });
 
@@ -296,7 +317,7 @@ impl SendBuffer {
         let mut expired_seqs: Vec<(MsgNo, SeqNo)> = Vec::new();
         for e in &self.entries {
             if e.msg_ttl >= 0 {
-                let elapsed = now.duration_since(e.origin_time);
+                let elapsed = now.duration_since(e.queue_time);
                 if elapsed.as_millis() > e.msg_ttl as u128 {
                     expired_seqs.push((e.msg_no, e.seq_no));
                 }
@@ -326,12 +347,12 @@ impl SendBuffer {
         if !expired_seqs.is_empty() {
             let cursor_adjust: usize = self.entries.iter().take(self.send_cursor).filter(|e| {
                 if e.msg_ttl < 0 { return false; }
-                now.duration_since(e.origin_time).as_millis() > e.msg_ttl as u128
+                now.duration_since(e.queue_time).as_millis() > e.msg_ttl as u128
             }).count();
 
             self.entries.retain(|e| {
                 if e.msg_ttl < 0 { return true; }
-                now.duration_since(e.origin_time).as_millis() <= e.msg_ttl as u128
+                now.duration_since(e.queue_time).as_millis() <= e.msg_ttl as u128
             });
             self.send_cursor = self.send_cursor.saturating_sub(cursor_adjust);
         }
