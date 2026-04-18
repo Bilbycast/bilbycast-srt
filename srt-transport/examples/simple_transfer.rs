@@ -1,7 +1,7 @@
-// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// Copyright (c) 2026 Softside Tech Pty Ltd. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 
-// Copyright (c) 2026 Reza Rahimi. All rights reserved.
+// Copyright (c) 2026 Softside Tech Pty Ltd. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 
 //! Simple SRT data transfer: listener receives messages from a caller.
