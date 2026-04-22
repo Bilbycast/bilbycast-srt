@@ -69,6 +69,11 @@ pub mod socket;
 
 pub use srt_protocol;
 
+/// Identifies the compiled SRT backend at runtime. Edge-side validation uses
+/// this to warn about interop caveats that only apply to one backend (e.g.
+/// the pure-Rust FEC+encryption ordering bug with C++ libsrt peers).
+pub const BACKEND_NAME: &str = "pure-rust";
+
 // Re-exports for convenience
 pub use socket::{SrtSocket, SrtSocketBuilder};
 pub use listener::{SrtListener, SrtListenerBuilder};
