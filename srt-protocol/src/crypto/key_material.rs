@@ -58,24 +58,21 @@ pub fn derive_kek(passphrase: &str, salt: &[u8], key_size: KeySize) -> Vec<u8> {
 /// The KEK (Key Encrypting Key) protects the SEK during transport
 /// in key material exchange messages.
 pub fn wrap_key(kek: &[u8], sek: &[u8]) -> Result<Vec<u8>, &'static str> {
-    use aes_kw::Kek;
-    use aes::Aes128;
-    use aes::Aes256;
+    use aes_kw::cipher::KeyInit;
+    use aes_kw::{KwAes128, KwAes256};
 
     match kek.len() {
         16 => {
-            let kek_obj = Kek::<Aes128>::try_from(kek).map_err(|_| "invalid KEK")?;
+            let kw = KwAes128::new_from_slice(kek).map_err(|_| "invalid KEK")?;
             let mut wrapped = vec![0u8; sek.len() + 8]; // AES-KW adds 8 bytes
-            kek_obj
-                .wrap(sek, &mut wrapped)
+            kw.wrap_key(sek, &mut wrapped)
                 .map_err(|_| "key wrap failed")?;
             Ok(wrapped)
         }
         32 => {
-            let kek_obj = Kek::<Aes256>::try_from(kek).map_err(|_| "invalid KEK")?;
+            let kw = KwAes256::new_from_slice(kek).map_err(|_| "invalid KEK")?;
             let mut wrapped = vec![0u8; sek.len() + 8];
-            kek_obj
-                .wrap(sek, &mut wrapped)
+            kw.wrap_key(sek, &mut wrapped)
                 .map_err(|_| "key wrap failed")?;
             Ok(wrapped)
         }
@@ -85,9 +82,8 @@ pub fn wrap_key(kek: &[u8], sek: &[u8]) -> Result<Vec<u8>, &'static str> {
 
 /// Unwrap a Stream Encrypting Key (SEK) using AES Key Unwrap (RFC 3394).
 pub fn unwrap_key(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, &'static str> {
-    use aes_kw::Kek;
-    use aes::Aes128;
-    use aes::Aes256;
+    use aes_kw::cipher::KeyInit;
+    use aes_kw::{KwAes128, KwAes256};
 
     if wrapped.len() < 24 {
         return Err("wrapped key too short");
@@ -95,18 +91,16 @@ pub fn unwrap_key(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, &'static str> {
 
     match kek.len() {
         16 => {
-            let kek_obj = Kek::<Aes128>::try_from(kek).map_err(|_| "invalid KEK")?;
+            let kw = KwAes128::new_from_slice(kek).map_err(|_| "invalid KEK")?;
             let mut unwrapped = vec![0u8; wrapped.len() - 8];
-            kek_obj
-                .unwrap(wrapped, &mut unwrapped)
+            kw.unwrap_key(wrapped, &mut unwrapped)
                 .map_err(|_| "key unwrap failed (wrong password?)")?;
             Ok(unwrapped)
         }
         32 => {
-            let kek_obj = Kek::<Aes256>::try_from(kek).map_err(|_| "invalid KEK")?;
+            let kw = KwAes256::new_from_slice(kek).map_err(|_| "invalid KEK")?;
             let mut unwrapped = vec![0u8; wrapped.len() - 8];
-            kek_obj
-                .unwrap(wrapped, &mut unwrapped)
+            kw.unwrap_key(wrapped, &mut unwrapped)
                 .map_err(|_| "key unwrap failed (wrong password?)")?;
             Ok(unwrapped)
         }

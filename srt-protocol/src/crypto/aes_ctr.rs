@@ -76,24 +76,18 @@ impl AesCtrCipher {
     fn apply_keystream(&self, iv: &[u8; 16], data: &mut [u8]) -> Result<(), &'static str> {
         match self.key_size {
             KeySize::AES128 => {
-                let mut cipher = Aes128Ctr::new(
-                    self.key.as_slice().into(),
-                    iv.as_slice().into(),
-                );
+                let mut cipher = Aes128Ctr::new_from_slices(&self.key, iv)
+                    .map_err(|_| "invalid key/iv length")?;
                 cipher.apply_keystream(data);
             }
             KeySize::AES192 => {
-                let mut cipher = Aes192Ctr::new(
-                    self.key.as_slice().into(),
-                    iv.as_slice().into(),
-                );
+                let mut cipher = Aes192Ctr::new_from_slices(&self.key, iv)
+                    .map_err(|_| "invalid key/iv length")?;
                 cipher.apply_keystream(data);
             }
             KeySize::AES256 => {
-                let mut cipher = Aes256Ctr::new(
-                    self.key.as_slice().into(),
-                    iv.as_slice().into(),
-                );
+                let mut cipher = Aes256Ctr::new_from_slices(&self.key, iv)
+                    .map_err(|_| "invalid key/iv length")?;
                 cipher.apply_keystream(data);
             }
         }
