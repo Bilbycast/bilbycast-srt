@@ -7,8 +7,9 @@ Cargo.lock
 .AppleDouble
 .LSOverride
 
-# Claude / AI tools
-.claude/
+# Claude Code — share settings.json, keep per-host launch.json + project state local
+.claude/*
+!.claude/settings.json
 
 # Editor & IDE
 .vscode/
