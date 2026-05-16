@@ -32,6 +32,7 @@ pub mod access_control;
 pub mod config;
 pub mod error;
 pub mod packet;
+pub mod received_packet;
 pub mod stats;
 pub mod window;
 
@@ -50,4 +51,5 @@ pub use error::{RejectReason, SrtError};
 pub use packet::SrtPacket;
 pub use packet::seq::SeqNo;
 pub use packet::msg::MsgNo;
+pub use received_packet::ReceivedPacket;
 pub use stats::SrtStats;

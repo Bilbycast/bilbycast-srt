@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use srt_protocol::received_packet::ReceivedPacket;
 use tokio::sync::{mpsc, watch, Notify};
 
 use srt_protocol::config::{CryptoModeConfig, KeySize, SrtConfig, SocketStatus};
@@ -516,15 +517,29 @@ impl SrtSocket {
         Ok(data.len())
     }
 
-    /// Receive data from the SRT connection.
+    /// Receive a packet from the SRT connection with sender metadata.
+    ///
+    /// Returns a [`ReceivedPacket`] carrying the payload plus an
+    /// `Option<i64>` sender timestamp. The pure-Rust SRT stack does
+    /// not currently propagate sender timestamps (no TSBPD-style send-
+    /// time field on the wire today), so `sender_timestamp_us` is
+    /// always `None` from this backend. API parity with the libsrt
+    /// backend; consumers that subscribe to the timestamp gracefully
+    /// fall back to MPEG-TS PCR sampled from the bytes.
     ///
     /// Blocks until data is available or the connection is closed.
-    pub async fn recv(&self) -> Result<Bytes, SrtError> {
+    pub async fn recv(&self) -> Result<ReceivedPacket, SrtError> {
         let mut rx = self.app_recv_rx.lock().await;
         match rx.recv().await {
-            Some(data) => Ok(data),
+            Some(data) => Ok(ReceivedPacket::from_bytes(data)),
             None => Err(SrtError::NoConnection),
         }
+    }
+
+    /// Legacy-shape recv that discards sender metadata.
+    #[allow(dead_code)]
+    pub async fn recv_bytes(&self) -> Result<Bytes, SrtError> {
+        self.recv().await.map(|p| p.data)
     }
 
     /// Get the local address.
