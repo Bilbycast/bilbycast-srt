@@ -100,7 +100,7 @@
 
 ## Where libsrt v1.5.5 Is Ahead
 
-1. **Socket Groups / Bonding** — Broadcast and Main/Backup for hitless failover. The only remaining major feature gap. (Balancing mode still WIP even in libsrt.)
+1. **Socket Groups / Bonding** — Broadcast and Main/Backup for hitless failover. The only remaining major feature gap. (Balancing mode still WIP even in libsrt.) Note: bilbycast-srt ships bonding *config scaffolding* only — `SrtConfig::group_connect` + `group_min_stable_timeout` exist (`srt-protocol/src/config.rs`) but there is no working group data-plane behind them, so the functional "No" above is accurate.
 2. **Per-connection passphrase override** — libsrt's `srt_listen_callback` can set `SRTO_PASSPHRASE` per connection; bilbycast-srt's access control can accept/reject but not override the passphrase dynamically.
 3. **C FFI maturity** — Used by FFmpeg, OBS, GStreamer, VLC. bilbycast-srt's FFI is scaffolding.
 4. **Platform breadth** — Now includes Windows ARM64 and HarmonyOS. bilbycast-srt is untested on mobile/embedded.
