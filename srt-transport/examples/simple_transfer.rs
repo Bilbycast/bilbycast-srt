@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for i in 0..NUM_MESSAGES {
             match socket.recv().await {
                 Ok(data) => {
-                    let msg = String::from_utf8_lossy(&data);
+                    let msg = String::from_utf8_lossy(&data.data);
                     println!("[listener] Message {i}: {msg}");
                 }
                 Err(e) => {

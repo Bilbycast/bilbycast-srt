@@ -69,9 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             match tokio::time::timeout(Duration::from_secs(3), socket.recv()).await {
                 Ok(Ok(data)) => {
-                    recv_bytes_r.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    recv_bytes_r.fetch_add(data.data.len() as u64, Ordering::Relaxed);
                     recv_pkts_r.fetch_add(1, Ordering::Relaxed);
-                    file.write_all(&data).unwrap();
+                    file.write_all(&data.data).unwrap();
 
                     if last_stats.elapsed() >= Duration::from_secs(2) {
                         let stats = socket.stats().await;

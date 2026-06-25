@@ -122,7 +122,7 @@ async fn run_rendezvous_test(
             for _ in 0..NUM_MESSAGES {
                 match sock_recv.recv().await {
                     Ok(data) => {
-                        let text = String::from_utf8_lossy(&data);
+                        let text = String::from_utf8_lossy(&data.data);
                         if received % 10 == 0 {
                             println!("[Peer A] Received: {text}");
                         }
@@ -193,7 +193,7 @@ async fn run_rendezvous_test(
             for _ in 0..NUM_MESSAGES {
                 match sock_recv.recv().await {
                     Ok(data) => {
-                        let text = String::from_utf8_lossy(&data);
+                        let text = String::from_utf8_lossy(&data.data);
                         if received % 10 == 0 {
                             println!("[Peer B] Received: {text}");
                         }

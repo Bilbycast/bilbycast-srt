@@ -42,8 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match socket.recv().await {
             Ok(data) => {
-                let text = String::from_utf8_lossy(&data);
-                println!("  Received ({} bytes): {text}", data.len());
+                let text = String::from_utf8_lossy(&data.data);
+                println!("  Received ({} bytes): {text}", data.data.len());
             }
             Err(e) => {
                 println!("\nConnection ended: {e:?}");

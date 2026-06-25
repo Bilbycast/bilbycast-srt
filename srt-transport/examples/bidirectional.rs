@@ -44,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..NUM_PACKETS {
             match socket.recv().await {
                 Ok(data) => {
-                    assert_eq!(data[0], b'C', "expected caller tag 'C'");
-                    let idx = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+                    assert_eq!(data.data[0], b'C', "expected caller tag 'C'");
+                    let idx = u32::from_be_bytes([data.data[1], data.data[2], data.data[3], data.data[4]]);
                     if received % 10 == 0 {
-                        println!("[listener] Received packet #{idx} ({} bytes)", data.len());
+                        println!("[listener] Received packet #{idx} ({} bytes)", data.data.len());
                     }
-                    total_bytes += data.len();
+                    total_bytes += data.data.len();
                     received += 1;
                 }
                 Err(e) => {
@@ -118,12 +118,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..NUM_PACKETS {
         match socket.recv().await {
             Ok(data) => {
-                assert_eq!(data[0], b'L', "expected listener tag 'L'");
-                let idx = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+                assert_eq!(data.data[0], b'L', "expected listener tag 'L'");
+                let idx = u32::from_be_bytes([data.data[1], data.data[2], data.data[3], data.data[4]]);
                 if caller_received % 10 == 0 {
-                    println!("[caller] Received packet #{idx} ({} bytes)", data.len());
+                    println!("[caller] Received packet #{idx} ({} bytes)", data.data.len());
                 }
-                total_bytes += data.len();
+                total_bytes += data.data.len();
                 caller_received += 1;
             }
             Err(e) => {
