@@ -63,7 +63,10 @@ impl AesGcmCipher {
     /// Returns ciphertext + 16-byte authentication tag appended.
     pub fn encrypt(&self, salt: &[u8; 16], pkt_index: u32, plaintext: &[u8]) -> Result<Vec<u8>, &'static str> {
         let nonce_bytes = Self::build_nonce(salt, pkt_index);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        // `build_nonce` returns exactly [u8; 12] and `Nonce` is Array<u8, U12>,
+        // so this is the infallible const-size conversion — aes-gcm 0.11
+        // deprecated the panicking `from_slice`.
+        let nonce = &Nonce::from(nonce_bytes);
 
         match self.key_size {
             KeySize::AES128 => {
@@ -86,7 +89,7 @@ impl AesGcmCipher {
     /// Input must include the 16-byte authentication tag at the end.
     pub fn decrypt(&self, salt: &[u8; 16], pkt_index: u32, ciphertext: &[u8]) -> Result<Vec<u8>, &'static str> {
         let nonce_bytes = Self::build_nonce(salt, pkt_index);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &Nonce::from(nonce_bytes);
 
         match self.key_size {
             KeySize::AES128 => {
