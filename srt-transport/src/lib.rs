@@ -78,4 +78,5 @@ pub const BACKEND_NAME: &str = "pure-rust";
 pub use socket::{SrtSocket, SrtSocketBuilder};
 pub use listener::{SrtListener, SrtListenerBuilder};
 pub use srt_protocol::access_control::{AccessControl, AccessControlFn, HandshakeInfo};
+pub use srt_protocol::config::SocketStatus;
 pub use epoll::{SrtEpoll, SrtEpollOpt, SrtEpollEvent};
