@@ -15,7 +15,7 @@ A complete, pure-Rust implementation of the [SRT (Secure Reliable Transport)](ht
 - **Full Configuration** - 50+ socket options: bandwidth control (`max_bw`, `input_bw`, `overhead_bw`, `max_rexmit_bw`), buffer tuning (`flight_flag_size`, `send/recv_buffer_size`), encryption tuning (`enforced_encryption`, `km_refresh_rate`), protocol tuning (`retransmit_algo`, `loss_max_ttl`, `send_drop_delay`, `payload_size`, `ip_tos`)
 - **Statistics** - 80+ performance counters: rates, RTT, bandwidth, ACK/NAK, flow control, buffer state, TSBPD delays, FEC recovery/loss, reorder metrics
 - **Feature-gated crypto** - Encryption can be disabled at compile time for smaller binaries
-- **C FFI** - Optional C-compatible API matching the original `srt.h` interface
+- **C FFI (scaffolding, not usable)** - `srt.h`-shaped exports, but most are unimplemented stubs; see the `srt-ffi` note below and `docs/libsrt-comparison.md`
 - **Cross-platform** - Runs on Linux, macOS, Windows, and any platform Rust supports
 
 ## Workspace Structure
@@ -33,7 +33,7 @@ bilbycast-srt/
 |-------|-------------|----------|
 | [`srt-protocol`](srt-protocol/) | Protocol state machines, packet serialization, crypto, buffers | Building a custom transport or embedding SRT logic |
 | [`srt-transport`](srt-transport/) | Ready-to-use async SRT sockets and listeners | Building Rust applications that need SRT |
-| [`srt-ffi`](srt-ffi/) | C API (`srt_create_socket`, `srt_send`, etc.) | Drop-in replacement for the C++ SRT library |
+| [`srt-ffi`](srt-ffi/) | C API (`srt_create_socket`, `srt_send`, etc.) | **Scaffolding / WIP** — symbol-compatible with `srt.h`, 18 of its 27 exported functions are `// TODO: implement` stubs and nothing that opens a socket or moves a byte works. Not usable as a libsrt replacement today |
 
 ## Quick Start
 
@@ -352,7 +352,25 @@ The transport crate provides the async networking:
 
 ### FFI Layer (`srt-ffi`)
 
-The FFI crate provides C function exports matching `srt.h`:
+**Status: scaffolding.** The crate exports 27 `srt.h`-shaped symbols, so a C
+program links against it — but 18 of them are `// TODO: implement` stubs, and
+between those and three further placeholders nothing that opens a socket or
+moves a byte works. Most stubs fail loudly: `srt_bind` / `srt_listen` /
+`srt_connect` / `srt_send` / `srt_recv` / `srt_setsockopt` / `srt_getsockopt` /
+the `srt_epoll_*` family return `SRT_ERROR`, and `srt_create_socket()` /
+`srt_accept()` return `SRT_INVALID_SOCK`.
+
+**Three do something worse than fail** — they report success or a canned value,
+so a C caller cannot tell the call did nothing: `srt_close` returns `0`
+(success), `srt_getsockstate` returns `1` (`SRTS_INIT`) for any socket, and
+`srt_clearlasterror` returns nothing at all. Treat a clean return from those
+three as meaningless, not as a working call.
+
+Only `srt_startup`, `srt_cleanup` and `srt_getversion` do real work. Use
+`srt-transport` from Rust; there is no C path to a working SRT session in this
+crate today. `docs/libsrt-comparison.md` tracks the coverage.
+
+The symbols exported (implemented or not):
 
 - `srt_startup()` / `srt_cleanup()`
 - `srt_create_socket()` / `srt_close()`
@@ -378,6 +396,10 @@ srt-protocol = { path = "../bilbycast-srt/srt-protocol" }
 ```
 
 ### As a C library
+
+**This builds and links, but does not carry media** — see the `srt-ffi` status
+note above. The example below calls only the three functions that are actually
+implemented; anything that opens a socket or sends a byte returns an error.
 
 Build the FFI crate as a shared library:
 
