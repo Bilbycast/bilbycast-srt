@@ -1,15 +1,31 @@
 // Copyright (c) 2026 Softside Tech Pty Ltd. All rights reserved.
 // SPDX-License-Identifier: MPL-2.0
 
-// Copyright (c) 2026 Softside Tech Pty Ltd. All rights reserved.
-// SPDX-License-Identifier: MPL-2.0
-
-//! C FFI bindings for the Rust SRT implementation.
+//! C FFI bindings for the Rust SRT implementation — **scaffolding, not a
+//! working C SRT library.**
 //!
 //! This crate provides `#[unsafe(no_mangle)] extern "C"` functions matching the
-//! [original SRT C API](https://github.com/Haivision/srt/blob/master/srtcore/srt.h).
-//! It can be compiled as a shared library (`.so`/`.dylib`/`.dll`) or static
-//! library (`.a`) and used as a drop-in replacement for the C++ SRT library.
+//! [original SRT C API](https://github.com/Haivision/srt/blob/master/srtcore/srt.h),
+//! and can be compiled as a shared library (`.so`/`.dylib`/`.dll`) or static
+//! library (`.a`) — so a C program links against it. **It is not a drop-in
+//! replacement for the C++ SRT library, and nothing that opens a socket or
+//! moves a byte works.** 18 of the 27 exported functions are `// TODO:
+//! implement` stubs.
+//!
+//! Most stubs fail loudly: `srt_bind` / `srt_listen` / `srt_connect` /
+//! `srt_send` / `srt_recv` / `srt_setsockopt` / `srt_getsockopt` and the
+//! `srt_epoll_*` family return `SRT_ERROR`, and `srt_create_socket` /
+//! `srt_accept` return `SRT_INVALID_SOCK`.
+//!
+//! **Three do something worse than fail** — they report success or a canned
+//! value, so a C caller cannot tell the call did nothing: `srt_close` returns
+//! `0`, `srt_getsockstate` returns `1` (`SRTS_INIT`) for any socket, and
+//! `srt_clearlasterror` returns nothing at all. A clean return from those three
+//! is meaningless, not a working call.
+//!
+//! Only `srt_startup`, `srt_cleanup` and `srt_getversion` do real work. From
+//! Rust, use `srt-transport`; there is no C path to a working SRT session in
+//! this crate today. `docs/libsrt-comparison.md` tracks the coverage.
 //!
 //! # Exported Functions
 //!
