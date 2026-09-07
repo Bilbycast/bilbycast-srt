@@ -1,6 +1,6 @@
 [package]
 name = "srt-transport"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 description = "Async I/O transport layer for the SRT protocol"
 license = "MPL-2.0"
@@ -9,7 +9,7 @@ license = "MPL-2.0"
 srt-protocol = { path = "../srt-protocol" }
 tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "time", "sync", "macros"] }
 socket2 = { version = "0.6.5", features = ["all"] }
-log = "0.4.33"
+log = "0.4.34"
 bytes = "1.12.1"
 bitflags = "2.13.1"
 rand = "0.10.2"
