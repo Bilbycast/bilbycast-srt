@@ -453,19 +453,21 @@ All dependencies are pure Rust crates:
 
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
-| `bytes` | `1.11.1` | Efficient byte buffer management |
-| `bitflags` | `2.11.0` | Type-safe bitflag definitions |
-| `log` | `0.4.29` | Logging facade |
-| `rand` | `0.10.0` | Random number generation |
-| `tokio` | `1.50.0` | Async runtime (transport only) |
-| `socket2` | `0.6.3` | Low-level socket configuration |
-| `aes` | `0.8.4` | AES block cipher (optional) |
-| `ctr` | `0.9.2` | CTR mode (optional) |
-| `aes-gcm` | `0.10.3` | AES-GCM AEAD (optional) |
-| `pbkdf2` | `0.12.2` | Key derivation (optional) |
-| `sha1` | `0.10` | SHA-1 hash (optional) |
-| `hmac` | `0.12` | HMAC (optional) |
-| `aes-kw` | `0.2` | AES Key Wrap RFC 3394 (optional) |
+| `bytes` | `1.12.1` | Efficient byte buffer management |
+| `bitflags` | `2.13.1` | Type-safe bitflag definitions |
+| `log` | `0.4.34` | Logging facade |
+| `rand` | `0.10.2` | Random number generation |
+| `tokio` | `1.53.1` | Async runtime (transport only) |
+| `socket2` | `0.6.5` | Low-level socket configuration (transport only) |
+| `aes` | `0.9.3` | AES block cipher (optional) |
+| `ctr` | `0.10.1` | CTR mode (optional) |
+| `aes-gcm` | `0.11.1` | AES-GCM AEAD (optional) |
+| `pbkdf2` | `0.13.0` | Key derivation (optional) |
+| `sha1` | `0.11` | SHA-1 hash (optional) |
+| `hmac` | `0.13` | HMAC (optional) |
+| `aes-kw` | `0.3.1` | AES Key Wrap RFC 3394 (optional) |
+
+The seven optional crypto crates are one RustCrypto generation and advance together — mixing generations breaks `Block` alignment, so pin them as a set or not at all.
 
 ## License
 

@@ -37,7 +37,7 @@ The send buffer (`srt-protocol/src/buffer/send.rs`) needs to:
 2. Skip FEC slot positions when assigning sequence numbers to data packets via `next_packet()`
 3. Provide `allocate_fec_seq()` for the send loop to get the next FEC slot's sequence number
 
-The send loop (`srt-transport/src/send_loop.rs`) needs to:
+The send path (`srt-transport/src/conn_task.rs` — the send loop was folded into `ConnTask` in v0.3.0, commit c1ba556; `recv_loop.rs` survives as a stateless parse-and-route loop) needs to:
 1. After the encoder returns FEC packets, call `send_buf.allocate_fec_seq()` to get the correct seq (instead of using `fec_pkt.seq_no` from the encoder)
 2. The encoder's returned `seq_no` field becomes unused (or removed)
 
@@ -46,7 +46,7 @@ The send loop (`srt-transport/src/send_loop.rs`) needs to:
 The decoder (`srt-protocol/src/fec/decoder.rs`) `on_data_packet()` needs to:
 1. Use a `FecSeqMap` to convert raw seq offsets to data positions (accounting for FEC slots)
 2. Replace `row = offset / cols` with `seq_map.seq_offset_to_data_position(offset)`
-3. The `DataPosition` struct already exists in `fec/mod.rs` — use its `row_number`, `row_index`, and `col_index` fields
+3. Introduce a `DataPosition { row_number, row_index, col_index }` in `fec/mod.rs` alongside `FecSeqMap` — neither type is in the tree today; both are work to be done
 
 The `FecSeqMap` (`srt-protocol/src/fec/mod.rs`) column assignment must use C++ libsrt's formula:
 ```
@@ -63,11 +63,11 @@ C++ libsrt calls `feedSource()` AFTER encryption in `packData()`, so FEC parity 
 | File | What to change |
 |------|----------------|
 | `srt-protocol/src/buffer/send.rs` | Add FEC seq map, skip FEC slots in `next_packet()`, add `allocate_fec_seq()` |
-| `srt-protocol/src/fec/mod.rs` | `FecSeqMap::new()` column formula, `DataPosition.col_index` field |
+| `srt-protocol/src/fec/mod.rs` | Add `FecSeqMap` (with the `new()` column formula) and `DataPosition` — neither type exists yet |
 | `srt-protocol/src/fec/decoder.rs` | Use `FecSeqMap` for seq→position mapping instead of `offset/cols` |
 | `srt-protocol/src/fec/encoder.rs` | Remove `seq_no` from `FecPacketData` (send loop allocates seqs) |
-| `srt-transport/src/send_loop.rs` | Use `send_buf.allocate_fec_seq()` for FEC packet seq numbers |
-| `srt-transport/src/connection.rs` | Pass FEC config to send buffer in `init_fec()` |
+| `srt-transport/src/conn_task.rs` | Use `send_buf.allocate_fec_seq()` for FEC packet seq numbers (the send loop lives in `ConnTask` since v0.3.0) |
+| `srt-transport/src/conn_task.rs` (`ConnTask::new`) | Pass the negotiated FEC config to `SendBuffer::new` — there is no `connection.rs` `init_fec()`; `connection.rs` is a routing handle only, and `socket.rs` / `listener.rs` build the FEC codecs and hand them in |
 
 ### Testing
 

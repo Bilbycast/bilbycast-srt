@@ -2,7 +2,7 @@
 
 Async I/O transport layer for the SRT protocol, built on [tokio](https://tokio.rs/).
 
-This crate provides ready-to-use `SrtSocket` and `SrtListener` types with a builder pattern API. It handles all the networking: UDP sockets, packet dispatch, send/receive scheduling, connection multiplexing, and event notification.
+This crate provides ready-to-use `SrtSocket` and `SrtListener` types with a builder pattern API. It handles all the networking: UDP sockets, packet dispatch, send/receive scheduling, and connection multiplexing. The epoll-style event-notification registry is scaffolding — nothing reports readiness into it yet (see [Event-driven multiplexing](#event-driven-multiplexing-epoll) below).
 
 ## Usage
 
@@ -32,9 +32,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Send data
     socket.send(b"Hello SRT!").await?;
 
-    // Receive data
-    let data = socket.recv().await?;
-    println!("Received: {} bytes", data.len());
+    // Receive data. `recv` yields a ReceivedPacket (the payload plus the
+    // sender timestamp when one is carried); `recv_bytes` yields the
+    // payload alone
+    let packet = socket.recv().await?;
+    println!("Received: {} bytes", packet.data.len());
 
     // Clean shutdown
     socket.close().await?;
@@ -50,7 +52,8 @@ use srt_transport::SrtListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = SrtListener::builder()
+    // `accept` takes &mut self, so the listener must be mutable
+    let mut listener = SrtListener::builder()
         .bind("0.0.0.0:4200".parse()?)
         .await?;
 
@@ -58,8 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Accept a connection
     let client = listener.accept().await?;
-    let data = client.recv().await?;
-    println!("Received: {:?}", data);
+    let packet = client.recv().await?;
+    println!("Received: {} bytes", packet.data.len());
 
     Ok(())
 }
@@ -156,24 +159,35 @@ println!("Reorder distance/tolerance: {}/{}", stats.pkt_reorder_distance, stats.
 
 ### Event-driven multiplexing (Epoll)
 
+`SrtEpoll` mirrors the C++ `CEPoll` registry: subscriptions are keyed by
+`SrtSocketId` (an `i32`), every method is async, and `wait` returns a plain
+`Vec`, empty when the timeout expires.
+
 ```rust
 use srt_transport::{SrtEpoll, SrtEpollOpt};
 use std::time::Duration;
 
-let mut epoll = SrtEpoll::new();
+let epoll = SrtEpoll::new();
 
-// Register sockets for read/write readiness
-epoll.add(&socket1, SrtEpollOpt::IN | SrtEpollOpt::OUT);
-epoll.add(&socket2, SrtEpollOpt::IN);
+// Register socket IDs for read/write readiness
+epoll.add(socket1_id, SrtEpollOpt::IN | SrtEpollOpt::OUT).await;
+epoll.add(socket2_id, SrtEpollOpt::IN).await;
 
 // Wait for events
-let events = epoll.wait(Duration::from_millis(100)).await?;
+let events = epoll.wait(Duration::from_millis(100)).await;
 for event in &events {
     if event.events.contains(SrtEpollOpt::IN) {
         // Socket is ready for reading
     }
 }
 ```
+
+**Not wired up yet.** Readiness only ever reaches the registry through
+`SrtEpoll::update_events`, and nothing in the crate calls it (no socket,
+connection task or receive loop reports itself ready), so `wait` always runs
+out its timeout and returns an empty `Vec`. `SrtSocket` also keeps its socket
+ID private, so there is no way to obtain the ID this API wants. Await
+`SrtSocket::recv` directly, or `tokio::select!` across sockets.
 
 ## Module Reference
 
@@ -182,41 +196,46 @@ for event in &events {
 | `socket` | `SrtSocket` and `SrtSocketBuilder` - main client API |
 | `listener` | `SrtListener` and `SrtListenerBuilder` - server/accept API |
 | `connector` | HSv5 caller-side handshake implementation |
+| `connector_rendezvous` | HSv5 rendezvous (peer-to-peer) handshake |
 | `channel` | UDP channel wrapper over `tokio::net::UdpSocket` |
 | `multiplexer` | Routes packets across multiple SRT connections on one UDP port |
-| `connection` | Internal connection state combining protocol + transport |
-| `send_loop` | Async send task with congestion-controlled pacing |
-| `recv_loop` | Async receive task with packet dispatch |
-| `epoll` | Event notification system for socket multiplexing |
-| `manager` | Global socket registry and ID generation |
+| `connection` | Thin routing handle - config, addresses, socket ID and the channels the receive loop writes into |
+| `conn_task` | Single-owner connection task holding all mutable protocol state (buffers, congestion control, timers, crypto, FEC) and doing the congestion-controlled sending |
+| `recv_loop` | Stateless async receive loop - parses UDP packets and routes them to the connection task |
+| `epoll` | Event-notification registry for socket multiplexing (scaffolding: nothing reports readiness into it) |
+| `manager` | Socket registry and ID generation (unused: `SrtManager` has no callers, and sockets take a random ID and register with the multiplexer) |
 
 ## Architecture
+
+Each connection is driven by a single task that owns all mutable protocol
+state as plain fields, with no mutex on the data path. The receive loop is
+stateless: it parses UDP packets and forwards them on as events.
 
 ```
                     +-----------------+
                     |   SrtSocket     |  (user-facing API)
                     +--------+--------+
+                             |  bounded mpsc (app send / recv)
+                    +--------v---------+
+                    |     ConnTask     |  (single owner of protocol state:
+                    |  (tokio::spawn)  |   buffers, CC, timers, crypto, FEC)
+                    +---+-----------^--+
+                        |           |  unbounded mpsc (NetEvent)
+                send_to |           |
+                        |  +--------+--------+
+                        |  |    recv_loop    |  (stateless: parse + route)
+                        |  |  (tokio::spawn) |
+                        |  +--------^--------+
+                        |           |  recv_from
+     +------------------v-----------+----------------+
+     |                  Multiplexer                  |
+     |   (routes packets by destination socket ID)   |
+     +-----------------------+-----------------------+
                              |
-                    +--------v--------+
-                    |  SrtConnection  |  (protocol state: buffers, CC, timers)
-                    +--------+--------+
-                             |
-              +--------------+--------------+
-              |                             |
-     +--------v--------+          +--------v--------+
-     |   send_loop     |          |   recv_loop     |
-     | (tokio::spawn)  |          | (tokio::spawn)  |
-     +--------+--------+          +--------+--------+
-              |                             |
-     +--------v-----------------------------v--------+
-     |              Multiplexer                      |
-     |  (routes packets by destination socket ID)    |
-     +-------------------------+---------------------+
-                               |
-                      +--------v--------+
-                      |   UdpChannel    |
-                      | (tokio UdpSocket)|
-                      +-----------------+
+                    +--------v---------+
+                    |    UdpChannel    |
+                    | (tokio UdpSocket)|
+                    +------------------+
 ```
 
 ## Testing

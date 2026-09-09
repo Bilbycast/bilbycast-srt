@@ -2,35 +2,25 @@
 
 C FFI compatibility layer for the Rust SRT implementation.
 
-This crate provides C-compatible function exports that match the [original SRT C API](https://github.com/Haivision/srt/blob/master/srtcore/srt.h). It can be compiled as a shared library (`.so`/`.dylib`/`.dll`) or static library (`.a`/`.lib`) and used as a drop-in replacement for the C++ SRT library.
+This crate provides C-compatible function exports that match the [original SRT C API](https://github.com/Haivision/srt/blob/master/srtcore/srt.h), and compiles as a shared library (`.so`/`.dylib`/`.dll`) or static library (`.a`/`.lib`), so a C program links against it.
+
+**It is scaffolding, not a working C SRT library, and it is not a drop-in replacement for the C++ SRT library.** Only three of the 27 exported functions do real work — `srt_startup`, `srt_cleanup` and `srt_getversion`; the other 24 are stubs (18 still carrying a literal `// TODO: implement`) or delegate to one, so nothing that opens a socket or moves a byte works (see [Implementation Status](#implementation-status) below). From Rust, use `srt-transport`; there is no C path to a working SRT session in this crate today.
 
 ## Building
 
-### Shared library (default)
+`srt-ffi/Cargo.toml` already declares `crate-type = ["cdylib", "staticlib"]`, so a single build emits both the shared and the static library. There is nothing to add to the manifest.
 
 ```bash
 cargo build --release -p srt-ffi
 
-# Output locations:
+# Shared library:
 # macOS:   target/release/libsrt_ffi.dylib
 # Linux:   target/release/libsrt_ffi.so
 # Windows: target/release/srt_ffi.dll
-```
 
-### Static library
-
-Add to `srt-ffi/Cargo.toml`:
-
-```toml
-[lib]
-crate-type = ["cdylib", "staticlib"]
-```
-
-Then build:
-
-```bash
-cargo build --release -p srt-ffi
-# Output: target/release/libsrt_ffi.a (or srt_ffi.lib on Windows)
+# Static library:
+# Unix:    target/release/libsrt_ffi.a
+# Windows: target/release/srt_ffi.lib
 ```
 
 ### Verify no system dependencies
@@ -118,6 +108,8 @@ void srt_setloglevel(int ll);
 
 ## Usage from C
 
+Only `srt_startup`, `srt_cleanup` and `srt_getversion` return meaningful results today; the socket calls sketched below fail (see [Implementation Status](#implementation-status)).
+
 ```c
 #include <stdio.h>
 #include <string.h>
@@ -175,16 +167,19 @@ lib.srt_cleanup()
 | Function | Status |
 |----------|--------|
 | `srt_startup` / `srt_cleanup` | Implemented |
-| `srt_getversion` | Implemented |
-| `srt_create_socket` / `srt_close` | Stub (returns placeholder) |
-| `srt_bind` / `srt_listen` / `srt_accept` | Stub |
-| `srt_connect` | Stub |
-| `srt_send` / `srt_recv` | Stub |
-| `srt_setsockopt` / `srt_getsockopt` | Stub |
-| `srt_epoll_*` | Stub |
-| `srt_getlasterror` / `srt_strerror` | Stub |
+| `srt_getversion` | Implemented (returns `SRT_VERSION`, `0x010505`) |
+| `srt_bind` / `srt_listen` / `srt_connect` | Stub - returns `SRT_ERROR` |
+| `srt_send` / `srt_sendmsg` / `srt_recv` / `srt_recvmsg` | Stub - returns `SRT_ERROR` |
+| `srt_setsockopt` / `srt_getsockopt` / `srt_setsockflag` / `srt_getsockflag` | Stub - returns `SRT_ERROR` |
+| `srt_epoll_*` | Stub - returns `SRT_ERROR` |
+| `srt_create_socket` / `srt_accept` | Stub - returns `SRT_INVALID_SOCK` |
+| `srt_strerror` | Stub - always returns the static string `"SRT error"` |
+| `srt_setloglevel` | Stub - does nothing |
+| **`srt_close`** | Stub that **reports success** - returns `0` without closing anything |
+| **`srt_getsockstate`** | Stub that **reports a canned value** - returns `1` (`SRTS_INIT`) for any socket |
+| **`srt_getlasterror` / `srt_clearlasterror`** | Stub that **reports no error** - `srt_getlasterror` returns `0`, `srt_clearlasterror` does nothing |
 
-Functions marked "Stub" have the correct C signature and are exported, but return `SRT_ERROR` until the transport layer integration is completed.
+Every stub carries the correct C signature and is exported, so a C program links and runs. Most fail loudly with `SRT_ERROR` / `SRT_INVALID_SOCK`, but the bold rows return success or a canned value, so a C caller cannot tell the call did nothing. A clean return from those is meaningless, not a working call. `docs/libsrt-comparison.md` tracks the coverage.
 
 ## License
 

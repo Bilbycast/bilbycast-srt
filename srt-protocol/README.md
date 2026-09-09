@@ -47,7 +47,7 @@ SRT packets use a 128-bit (16-byte) header followed by a payload:
 - `SrtPacket` - Parsed SRT packet with header and payload
 - `SeqNo` - 31-bit circular sequence number with wrapping arithmetic
 - `MsgNo` - 26-bit message number with boundary and retransmission flags
-- `ControlType` - ACK, NAK, Handshake, Keepalive, Shutdown, DropReq, AckAck
+- `ControlType` - Handshake, Keepalive, ACK, NAK, CongestionWarning, Shutdown, AckAck, DropReq, PeerError, UserDefined
 
 ### `protocol` - State Machines
 
@@ -84,7 +84,7 @@ All crypto uses pure-Rust [RustCrypto](https://github.com/RustCrypto) crates:
 ### `fec` - Forward Error Correction
 
 - XOR-based row/column FEC packet recovery
-- Configurable FEC group layout (row, staircase)
+- Configurable matrix layout (`even`, `staircase`) and group geometry, parsed from the libsrt-compatible filter string `"fec,cols:10,rows:5,layout:staircase,arq:onreq"` (`rows:1`, the default, is row-only FEC)
 
 ### `config` - Socket Options
 
@@ -111,24 +111,30 @@ All crypto uses pure-Rust [RustCrypto](https://github.com/RustCrypto) crates:
 
 ```rust
 use srt_protocol::packet::SrtPacket;
-use bytes::{Bytes, BytesMut};
+use srt_protocol::packet::header::{EncryptionKeySpec, PacketBoundary};
+use srt_protocol::packet::msg::MsgNo;
+use srt_protocol::packet::seq::SeqNo;
+use bytes::Bytes;
 
 // Create a data packet
 let packet = SrtPacket::new_data(
-    0,          // sequence number
-    0,          // message number (with flags)
-    12345,      // timestamp
-    42,         // destination socket ID
+    SeqNo::new(0),            // sequence number
+    MsgNo::new(0),            // message number
+    PacketBoundary::Solo,     // single-packet message
+    true,                     // in-order delivery
+    EncryptionKeySpec::NoEnc, // not encrypted
+    false,                    // not a retransmission
+    12345,                    // timestamp
+    42,                       // destination socket ID
     Bytes::from_static(b"Hello SRT"),
 );
 
-// Serialize
-let mut buf = BytesMut::new();
-packet.serialize(&mut buf);
+// Serialize (or `packet.serialize(&mut buf)` into an existing BytesMut)
+let buf = packet.to_bytes();
 
-// Deserialize
-let parsed = SrtPacket::parse(&buf).unwrap();
-assert_eq!(parsed.payload(), b"Hello SRT");
+// Deserialize (returns None on a short buffer)
+let parsed = SrtPacket::deserialize(&buf).unwrap();
+assert_eq!(parsed.payload().as_ref(), b"Hello SRT");
 ```
 
 ### Key derivation
