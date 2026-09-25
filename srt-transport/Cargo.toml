@@ -11,8 +11,8 @@ tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "time", "syn
 socket2 = { version = "0.6.5", features = ["all"] }
 log = "0.4.34"
 bytes = "1.12.1"
-bitflags = "2.13.1"
-rand = "0.10.2"
+bitflags = "2.13.2"
+rand = "0.10.3"
 
 [dev-dependencies]
 env_logger = "0.11"

@@ -7,9 +7,9 @@ license = "MPL-2.0"
 
 [dependencies]
 bytes = "1.12.1"
-bitflags = "2.13.1"
+bitflags = "2.13.2"
 log = "0.4.34"
-rand = "0.10.2"
+rand = "0.10.3"
 
 # Encryption (feature-gated, all pure Rust)
 # The whole suite is now on the RustCrypto hybrid-array generation:
