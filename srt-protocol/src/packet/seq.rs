@@ -50,6 +50,8 @@ impl SeqNo {
     }
 
     /// Add an offset to the sequence number with wrapping.
+    // Public API with a wrapping `i32` offset, not `ops::Add`; renaming it breaks callers.
+    #[allow(clippy::should_implement_trait)]
     #[inline]
     pub fn add(self, offset: i32) -> Self {
         Self::new(((self.0 as i64 + offset as i64) % (MAX_SEQ as i64 + 1)) as i32)

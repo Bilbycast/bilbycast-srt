@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-/// SRT protocol timing constants (in microseconds).
+// SRT protocol timing constants (in microseconds).
 
 /// ACK period (10ms).
 pub const COMM_SYN_INTERVAL_US: u64 = 10_000;

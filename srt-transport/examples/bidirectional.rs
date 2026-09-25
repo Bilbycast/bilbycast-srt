@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(data) => {
                     assert_eq!(data.data[0], b'C', "expected caller tag 'C'");
                     let idx = u32::from_be_bytes([data.data[1], data.data[2], data.data[3], data.data[4]]);
-                    if received % 10 == 0 {
+                    if received.is_multiple_of(10) {
                         println!("[listener] Received packet #{idx} ({} bytes)", data.data.len());
                     }
                     total_bytes += data.data.len();
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(data) => {
                 assert_eq!(data.data[0], b'L', "expected listener tag 'L'");
                 let idx = u32::from_be_bytes([data.data[1], data.data[2], data.data[3], data.data[4]]);
-                if caller_received % 10 == 0 {
+                if caller_received.is_multiple_of(10) {
                     println!("[caller] Received packet #{idx} ({} bytes)", data.data.len());
                 }
                 total_bytes += data.data.len();

@@ -45,11 +45,8 @@ impl SrtManager {
     /// Generate a unique socket ID.
     fn generate_id(&self) -> SrtSocketId {
         // Simple incrementing; C++ decrements but direction doesn't matter
-        loop {
-            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let id = (id & 0x3FFF_FFFF).max(1); // Keep in valid range [1, 2^30)
-            return id;
-        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        (id & 0x3FFF_FFFF).max(1) // Keep in valid range [1, 2^30)
     }
 
     /// Register a connection and return its socket ID.

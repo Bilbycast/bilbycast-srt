@@ -333,7 +333,7 @@ pub extern "C" fn srt_clearlasterror() {
 #[unsafe(no_mangle)]
 pub extern "C" fn srt_strerror(_code: c_int, _errbuflen: c_int) -> *const c_char {
     // Return a static string for now
-    b"SRT error\0".as_ptr() as *const c_char
+    c"SRT error".as_ptr()
 }
 
 // ── Status ──

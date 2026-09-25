@@ -217,7 +217,7 @@ impl KeyMaterialMessage {
             return None;
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
 
         // Row 0: S(1)|V(3)|PT(4)|Sign(16)|Resv(6)|KK(2)
         let row0 = buf.get_u32();
@@ -368,8 +368,8 @@ mod tests {
             KeySize::AES128,
             CipherType::AesCtr,
             [0u8; 16],
-            &vec![0u8; 24],
-            &vec![0u8; 24],
+            &[0u8; 24],
+            &[0u8; 24],
         );
 
         let mut buf = BytesMut::new();

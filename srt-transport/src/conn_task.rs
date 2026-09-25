@@ -350,6 +350,8 @@ impl ConnTask {
         }
     }
 
+    // One parameter per decoded SRT data-header field, mirroring `SrtPacket::new_data`.
+    #[allow(clippy::too_many_arguments)]
     fn on_data_packet(
         &mut self,
         seq: SeqNo,
@@ -587,7 +589,7 @@ impl ConnTask {
                 let gap_count = SeqNo::offset(expected, gap_end) + 1;
 
                 if reorder_tolerance > 0 {
-                    let threshold = seq.add(-(reorder_tolerance as i32));
+                    let threshold = seq.add(-reorder_tolerance);
                     let mut loss_count = 0i32;
                     let count = SeqNo::offset(expected, gap_end);
                     for i in 0..=count {
@@ -615,9 +617,9 @@ impl ConnTask {
 
             // Promote deferred gaps
             if reorder_tolerance > 0 {
-                let new_threshold = seq.add(-(reorder_tolerance as i32));
+                let new_threshold = seq.add(-reorder_tolerance);
                 let old_highest = self.highest_recv_seq;
-                let old_threshold = old_highest.add(-(reorder_tolerance as i32));
+                let old_threshold = old_highest.add(-reorder_tolerance);
                 if new_threshold.is_after(old_threshold) {
                     let promote_count = SeqNo::offset(old_threshold, new_threshold);
                     let mut promoted = 0i32;
@@ -654,11 +656,11 @@ impl ConnTask {
     }
 
     fn try_flush_pending_app_data(&mut self) {
-        if let Some(data) = self.pending_app_data.take() {
-            if self.send_buf.add_message(&data, -1, false).is_none() {
-                // Still full
-                self.pending_app_data = Some(data);
-            }
+        if let Some(data) = self.pending_app_data.take()
+            && self.send_buf.add_message(&data, -1, false).is_none()
+        {
+            // Still full
+            self.pending_app_data = Some(data);
         }
     }
 
@@ -699,7 +701,7 @@ impl ConnTask {
 
             if in_flight < effective_window {
                 let window_budget = effective_window.saturating_sub(in_flight);
-                let target_batch = window_budget.min(SEND_BATCH_SIZE).max(1);
+                let target_batch = window_budget.clamp(1, SEND_BATCH_SIZE);
 
                 // Drain entries from send buffer
                 let mut entries = Vec::with_capacity(target_batch);
@@ -719,7 +721,7 @@ impl ConnTask {
                     let dest_socket_id = self.peer_socket_id;
                     let mut serialised: Vec<(BytesMut, EncryptionKeySpec, u32, Bytes, usize)> =
                         Vec::with_capacity(entries.len());
-                    for (entry, (payload, enc_key)) in entries.iter().zip(encrypted.into_iter()) {
+                    for (entry, (payload, enc_key)) in entries.iter().zip(encrypted) {
                         let timestamp = entry.origin_time
                             .saturating_duration_since(start_time)
                             .as_micros() as u32;
@@ -762,31 +764,31 @@ impl ConnTask {
                     }
 
                     // FEC
-                    if batch_sent > 0 {
-                        if let Some(encoder) = self.fec_encoder.as_mut() {
-                            let mut fec_extra: Vec<BytesMut> = Vec::new();
-                            for (entry, ser) in entries.iter().zip(serialised.iter()).take(batch_sent) {
-                                let (_buf, enc_key, timestamp, fec_payload, _len) = ser;
-                                let fec_packets = encoder.on_data_packet(
-                                    entry.seq_no, *timestamp, *enc_key as u8, fec_payload,
+                    if batch_sent > 0
+                        && let Some(encoder) = self.fec_encoder.as_mut()
+                    {
+                        let mut fec_extra: Vec<BytesMut> = Vec::new();
+                        for (entry, ser) in entries.iter().zip(serialised.iter()).take(batch_sent) {
+                            let (_buf, enc_key, timestamp, fec_payload, _len) = ser;
+                            let fec_packets = encoder.on_data_packet(
+                                entry.seq_no, *timestamp, *enc_key as u8, fec_payload,
+                            );
+                            for fec_pkt in fec_packets {
+                                let fec_srt = SrtPacket::new_fec_data(
+                                    fec_pkt.seq_no, fec_pkt.timestamp,
+                                    dest_socket_id, fec_pkt.payload,
                                 );
-                                for fec_pkt in fec_packets {
-                                    let fec_srt = SrtPacket::new_fec_data(
-                                        fec_pkt.seq_no, fec_pkt.timestamp,
-                                        dest_socket_id, fec_pkt.payload,
-                                    );
-                                    let mut fec_buf = BytesMut::with_capacity(fec_srt.wire_size());
-                                    fec_srt.serialize(&mut fec_buf);
-                                    fec_extra.push(fec_buf);
-                                }
+                                let mut fec_buf = BytesMut::with_capacity(fec_srt.wire_size());
+                                fec_srt.serialize(&mut fec_buf);
+                                fec_extra.push(fec_buf);
                             }
-                            for fec_buf in &fec_extra {
-                                if let Err(e) = self.mux.send_to(fec_buf, peer_addr).await {
-                                    log::error!("FEC send error: {}", e);
-                                } else {
-                                    self.stats.pkt_snd_filter_extra += 1;
-                                    self.stats.pkt_snd_filter_extra_total += 1;
-                                }
+                        }
+                        for fec_buf in &fec_extra {
+                            if let Err(e) = self.mux.send_to(fec_buf, peer_addr).await {
+                                log::error!("FEC send error: {}", e);
+                            } else {
+                                self.stats.pkt_snd_filter_extra += 1;
+                                self.stats.pkt_snd_filter_extra_total += 1;
                             }
                         }
                     }
@@ -1086,10 +1088,10 @@ impl ConnTask {
             }
             CryptoMode::AesGcm => {
                 use srt_protocol::crypto::aes_gcm::AesGcmCipher;
-                if let Some(cipher) = AesGcmCipher::new(&key) {
-                    if let Ok(plaintext) = cipher.decrypt(&salt, pkt_index, raw_payload) {
-                        return Bytes::from(plaintext);
-                    }
+                if let Some(cipher) = AesGcmCipher::new(&key)
+                    && let Ok(plaintext) = cipher.decrypt(&salt, pkt_index, raw_payload)
+                {
+                    return Bytes::from(plaintext);
                 }
             }
         }
@@ -1124,10 +1126,10 @@ impl ConnTask {
             }
             CryptoMode::AesGcm => {
                 use srt_protocol::crypto::aes_gcm::AesGcmCipher;
-                if let Some(cipher) = AesGcmCipher::new(&key) {
-                    if let Ok(ct) = cipher.encrypt(&salt, pkt_index, &payload) {
-                        return (Bytes::from(ct), enc_spec);
-                    }
+                if let Some(cipher) = AesGcmCipher::new(&key)
+                    && let Ok(ct) = cipher.encrypt(&salt, pkt_index, &payload)
+                {
+                    return (Bytes::from(ct), enc_spec);
                 }
                 (payload, EncryptionKeySpec::NoEnc)
             }
@@ -1222,10 +1224,10 @@ impl ConnTask {
         let _ = self.mux.send_to(&buf, self.peer_addr).await;
 
         // Brief drain period
-        if let Some(linger) = self.config.linger {
-            if !linger.is_zero() {
-                tokio::time::sleep(linger.min(Duration::from_secs(1))).await;
-            }
+        if let Some(linger) = self.config.linger
+            && !linger.is_zero()
+        {
+            tokio::time::sleep(linger.min(Duration::from_secs(1))).await;
         }
 
         self.set_state(ConnectionState::Closed);

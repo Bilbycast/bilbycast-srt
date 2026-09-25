@@ -63,6 +63,8 @@ pub struct SrtPacket {
 
 impl SrtPacket {
     /// Create a data packet.
+    // One parameter per SRT data-header field; public API, so the signature stays.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_data(
         seq: SeqNo,
         msg_no: MsgNo,
@@ -348,7 +350,7 @@ impl SrtPacket {
         if data.len() < HEADER_SIZE {
             return None;
         }
-        let mut buf = &data[..];
+        let mut buf = data;
         let header = [
             buf.get_u32(),
             buf.get_u32(),

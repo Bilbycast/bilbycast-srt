@@ -174,28 +174,26 @@ pub async fn connect_rendezvous(
     let mut ext_flags = HS_EXT_HSREQ;
     if is_initiator {
         // KMREQ
-        if let Some(ref crypto_state) = crypto {
-            if let Some(sek) = crypto_state.keys.active_key() {
-                if let Some(kek) = crypto_state.kek.as_ref() {
-                    if let Ok(wrapped) = key_material::wrap_key(kek, sek) {
-                        let cipher = match crypto_state.mode {
-                            srt_protocol::crypto::CryptoMode::AesCtr => CipherType::AesCtr,
-                            srt_protocol::crypto::CryptoMode::AesGcm => CipherType::AesGcm,
-                        };
-                        let km_msg = KeyMaterialMessage::new_single(
-                            KeyIndex::Even, crypto_state.keys.key_size,
-                            cipher, crypto_state.salt, wrapped,
-                        );
-                        let mut km_buf = BytesMut::new();
-                        km_msg.serialize(&mut km_buf);
-                        let size_words = (km_buf.len() + 3) / 4;
-                        ext_buf.put_u32((3u32 << 16) | size_words as u32);
-                        ext_buf.extend_from_slice(&km_buf);
-                        while ext_buf.len() % 4 != 0 { ext_buf.put_u8(0); }
-                        ext_flags |= HS_EXT_KMREQ;
-                    }
-                }
-            }
+        if let Some(ref crypto_state) = crypto
+            && let Some(sek) = crypto_state.keys.active_key()
+            && let Some(kek) = crypto_state.kek.as_ref()
+            && let Ok(wrapped) = key_material::wrap_key(kek, sek)
+        {
+            let cipher = match crypto_state.mode {
+                srt_protocol::crypto::CryptoMode::AesCtr => CipherType::AesCtr,
+                srt_protocol::crypto::CryptoMode::AesGcm => CipherType::AesGcm,
+            };
+            let km_msg = KeyMaterialMessage::new_single(
+                KeyIndex::Even, crypto_state.keys.key_size,
+                cipher, crypto_state.salt, wrapped,
+            );
+            let mut km_buf = BytesMut::new();
+            km_msg.serialize(&mut km_buf);
+            let size_words = km_buf.len().div_ceil(4);
+            ext_buf.put_u32((3u32 << 16) | size_words as u32);
+            ext_buf.extend_from_slice(&km_buf);
+            while !ext_buf.len().is_multiple_of(4) { ext_buf.put_u8(0); }
+            ext_flags |= HS_EXT_KMREQ;
         }
 
         // Stream ID
@@ -302,13 +300,13 @@ pub async fn connect_rendezvous(
                 match ext.ext_type {
                     4 => {
                         let km_bytes: Vec<u8> = ext.data.iter().flat_map(|w| w.to_be_bytes()).collect();
-                        if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes) {
-                            if let Some(ref mut c) = crypto {
-                                c.salt = km_msg.salt;
-                                c.km_exchanged = true;
-                                got_kmrsp = true;
-                                log::debug!("HSv5 rendezvous: KMRSP received, encryption active");
-                            }
+                        if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes)
+                            && let Some(ref mut c) = crypto
+                        {
+                            c.salt = km_msg.salt;
+                            c.km_exchanged = true;
+                            got_kmrsp = true;
+                            log::debug!("HSv5 rendezvous: KMRSP received, encryption active");
                         }
                     }
                     7 => {
@@ -335,12 +333,12 @@ pub async fn connect_rendezvous(
                                         for e in &exts {
                                             if e.ext_type == 4 {
                                                 let km_bytes: Vec<u8> = e.data.iter().flat_map(|w| w.to_be_bytes()).collect();
-                                                if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes) {
-                                                    if let Some(ref mut c) = crypto {
-                                                        c.salt = km_msg.salt;
-                                                        c.km_exchanged = true;
-                                                        log::debug!("HSv5 rendezvous: KMRSP received (second CONCLUSION)");
-                                                    }
+                                                if let Some(km_msg) = KeyMaterialMessage::deserialize(&km_bytes)
+                                                    && let Some(ref mut c) = crypto
+                                                {
+                                                    c.salt = km_msg.salt;
+                                                    c.km_exchanged = true;
+                                                    log::debug!("HSv5 rendezvous: KMRSP received (second CONCLUSION)");
                                                 }
                                                 got_kmrsp = true;
                                             } else if e.ext_type == 7 {
@@ -431,10 +429,10 @@ pub async fn connect_rendezvous(
             if let Some(km_msg) = &km_response {
                 let mut km_buf = BytesMut::new();
                 km_msg.serialize(&mut km_buf);
-                let size_words = (km_buf.len() + 3) / 4;
+                let size_words = km_buf.len().div_ceil(4);
                 resp_ext_buf.put_u32((4u32 << 16) | size_words as u32);
                 resp_ext_buf.extend_from_slice(&km_buf);
-                while resp_ext_buf.len() % 4 != 0 { resp_ext_buf.put_u8(0); }
+                while !resp_ext_buf.len().is_multiple_of(4) { resp_ext_buf.put_u8(0); }
                 resp_ext_flags |= HS_EXT_KMREQ;
             }
 

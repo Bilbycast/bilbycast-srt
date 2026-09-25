@@ -119,12 +119,12 @@ impl ReceiveBuffer {
         let pos = (self.start_pos + offset as usize) % self.capacity;
 
         // Allow overwriting FEC placeholders (they occupy seq slots for ACK tracking
-        // but are not real data). Reject true duplicates (actual data already present).
-        if let Some(entry) = &self.entries[pos] {
-            if entry.state != SlotState::FecPlaceholder {
-                return false; // Real data already here — duplicate
-            }
-            // FEC placeholder — overwrite it with real data
+        // but are not real data). Reject true duplicates (actual data already present);
+        // an FEC placeholder falls through and is overwritten with real data.
+        if let Some(entry) = &self.entries[pos]
+            && entry.state != SlotState::FecPlaceholder
+        {
+            return false; // Real data already here — duplicate
         }
 
         self.entries[pos] = Some(ReceiveEntry {
@@ -192,10 +192,10 @@ impl ReceiveBuffer {
         let first = self.entries[self.start_pos].as_ref()?;
 
         // Check TSBPD readiness
-        if let Some(tsbpd) = tsbpd {
-            if !tsbpd.is_ready(first.timestamp) {
-                return None;
-            }
+        if let Some(tsbpd) = tsbpd
+            && !tsbpd.is_ready(first.timestamp)
+        {
+            return None;
         }
 
         match first.boundary {

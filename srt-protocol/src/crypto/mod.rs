@@ -194,7 +194,7 @@ impl CryptoControl {
         if self.km_refresh_rate == 0 {
             return false;
         }
-        self.pkt_count > 0 && (self.pkt_count % self.km_refresh_rate as u64) == 0
+        self.pkt_count > 0 && self.pkt_count.is_multiple_of(self.km_refresh_rate as u64)
     }
 
     /// Increment packet counter.

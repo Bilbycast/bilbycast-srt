@@ -577,10 +577,10 @@ async fn accept_loop(
         if let Some(km_msg) = &km_response {
             let mut km_buf = BytesMut::new();
             km_msg.serialize(&mut km_buf);
-            let size_words = (km_buf.len() + 3) / 4;
+            let size_words = km_buf.len().div_ceil(4);
             ext_buf.put_u32((4u32 << 16) | size_words as u32);
             ext_buf.extend_from_slice(&km_buf);
-            while ext_buf.len() % 4 != 0 { ext_buf.put_u8(0); }
+            while !ext_buf.len().is_multiple_of(4) { ext_buf.put_u8(0); }
             resp_ext_flags |= HS_EXT_KMREQ;
         }
 

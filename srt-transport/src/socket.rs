@@ -472,6 +472,8 @@ impl SrtSocket {
     }
 
     /// Create a socket from pre-built channels (used by listener accept).
+    // Crate-internal constructor taking each channel end the connection task was built with.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: Arc<SrtConfig>,
         local_addr: SocketAddr,

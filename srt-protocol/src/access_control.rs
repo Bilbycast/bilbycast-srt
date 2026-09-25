@@ -140,7 +140,7 @@ pub fn serialize_stream_id(stream_id: &str) -> Vec<u32> {
     }
     let mut bytes = stream_id.as_bytes().to_vec();
     // Pad to 4-byte boundary
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
     let size_words = bytes.len() / 4;
@@ -306,7 +306,7 @@ mod tests {
         // "hello world" = 11 bytes = 3 words with padding
         let s = "hello world";
         let mut bytes = s.as_bytes().to_vec();
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         let data: Vec<u32> = bytes.chunks(4)

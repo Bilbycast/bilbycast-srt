@@ -309,8 +309,48 @@ impl FecDecoder {
             // Try row groups
             let row_keys: Vec<u32> = self.row_groups.keys().copied().collect();
             for row_key in row_keys {
-                if let Some(group) = self.row_groups.get(&row_key) {
-                    if let Some((_, recovered)) = group.try_recover() {
+                if let Some(group) = self.row_groups.get(&row_key)
+                    && let Some((_, recovered)) = group.try_recover()
+                {
+                    let recovered_seq = recovered.seq_no;
+                    let recovered_ts = recovered.timestamp;
+                    let recovered_enc = recovered.enc_flags;
+                    let recovered_payload = recovered.payload.clone();
+
+                    all_recovered.push(recovered);
+                    self.received_seqs.insert(recovered_seq.value());
+                    changed = true;
+
+                    // Feed recovered packet into column groups (cascade)
+                    if self.config.is_2d() {
+                        let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
+                        let matrix_size = self.config.matrix_size();
+                        let matrix_cycle = offset / matrix_size;
+                        let pos_in_matrix = offset % matrix_size;
+                        let col_index = self.find_column_index(pos_in_matrix);
+                        let col_row = self.find_column_row(pos_in_matrix, col_index);
+                        let col_key = col_index as u64 * 100_000 + matrix_cycle as u64;
+                        if let Some(col_group) = self.col_groups.get_mut(&col_key) {
+                            col_group.mark_received(col_row, recovered_ts, recovered_enc, &recovered_payload);
+                        }
+                    }
+
+                    // Mark recovered in the row group itself
+                    if let Some(group) = self.row_groups.get_mut(&row_key) {
+                        let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
+                        let row_index = offset % self.config.cols;
+                        group.received[row_index] = true;
+                    }
+                }
+            }
+
+            // Try column groups
+            if self.config.is_2d() {
+                let col_keys: Vec<u64> = self.col_groups.keys().copied().collect();
+                for col_key in col_keys {
+                    if let Some(group) = self.col_groups.get(&col_key)
+                        && let Some((_, recovered)) = group.try_recover()
+                    {
                         let recovered_seq = recovered.seq_no;
                         let recovered_ts = recovered.timestamp;
                         let recovered_enc = recovered.enc_flags;
@@ -320,61 +360,21 @@ impl FecDecoder {
                         self.received_seqs.insert(recovered_seq.value());
                         changed = true;
 
-                        // Feed recovered packet into column groups (cascade)
-                        if self.config.is_2d() {
-                            let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
-                            let matrix_size = self.config.matrix_size();
-                            let matrix_cycle = offset / matrix_size;
-                            let pos_in_matrix = offset % matrix_size;
-                            let col_index = self.find_column_index(pos_in_matrix);
-                            let col_row = self.find_column_row(pos_in_matrix, col_index);
-                            let col_key = col_index as u64 * 100_000 + matrix_cycle as u64;
-                            if let Some(col_group) = self.col_groups.get_mut(&col_key) {
-                                col_group.mark_received(col_row, recovered_ts, recovered_enc, &recovered_payload);
-                            }
+                        // Feed recovered packet into row group (cascade)
+                        let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
+                        let row_number = (offset / self.config.cols) as u32;
+                        let row_index = offset % self.config.cols;
+                        if let Some(row_group) = self.row_groups.get_mut(&row_number) {
+                            row_group.mark_received(row_index, recovered_ts, recovered_enc, &recovered_payload);
                         }
 
-                        // Mark recovered in the row group itself
-                        if let Some(group) = self.row_groups.get_mut(&row_key) {
-                            let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
-                            let row_index = offset % self.config.cols;
-                            group.received[row_index] = true;
-                        }
-                    }
-                }
-            }
-
-            // Try column groups
-            if self.config.is_2d() {
-                let col_keys: Vec<u64> = self.col_groups.keys().copied().collect();
-                for col_key in col_keys {
-                    if let Some(group) = self.col_groups.get(&col_key) {
-                        if let Some((_, recovered)) = group.try_recover() {
-                            let recovered_seq = recovered.seq_no;
-                            let recovered_ts = recovered.timestamp;
-                            let recovered_enc = recovered.enc_flags;
-                            let recovered_payload = recovered.payload.clone();
-
-                            all_recovered.push(recovered);
-                            self.received_seqs.insert(recovered_seq.value());
-                            changed = true;
-
-                            // Feed recovered packet into row group (cascade)
-                            let offset = SeqNo::offset(self.base_seq, recovered_seq).max(0) as usize;
-                            let row_number = (offset / self.config.cols) as u32;
-                            let row_index = offset % self.config.cols;
-                            if let Some(row_group) = self.row_groups.get_mut(&row_number) {
-                                row_group.mark_received(row_index, recovered_ts, recovered_enc, &recovered_payload);
-                            }
-
-                            // Mark in column group
-                            if let Some(group) = self.col_groups.get_mut(&col_key) {
-                                // Find which row was recovered
-                                for (i, member_seq) in group.member_seqs.iter().enumerate() {
-                                    if *member_seq == recovered_seq {
-                                        group.received[i] = true;
-                                        break;
-                                    }
+                        // Mark in column group
+                        if let Some(group) = self.col_groups.get_mut(&col_key) {
+                            // Find which row was recovered
+                            for (i, member_seq) in group.member_seqs.iter().enumerate() {
+                                if *member_seq == recovered_seq {
+                                    group.received[i] = true;
+                                    break;
                                 }
                             }
                         }

@@ -42,19 +42,14 @@ pub const FEC_GROUP_ROW: i8 = -1;
 // ── FEC Layout ──
 
 /// FEC matrix layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FecLayout {
     /// Simple grid: column groups start at sequential offsets.
     Even,
     /// Staircase: column groups are staggered to spread FEC packets evenly.
     /// This is the default and recommended layout.
+    #[default]
     Staircase,
-}
-
-impl Default for FecLayout {
-    fn default() -> Self {
-        Self::Staircase
-    }
 }
 
 impl fmt::Display for FecLayout {
@@ -69,21 +64,16 @@ impl fmt::Display for FecLayout {
 // ── ARQ Mode ──
 
 /// ARQ (Automatic Repeat reQuest) interaction mode with FEC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ArqMode {
     /// Normal retransmission + FEC in parallel (default SRT behavior).
     Always,
     /// Suppress NAK until FEC exhausts recovery; then report uncoverable losses.
     /// This is the default for FEC-enabled connections.
+    #[default]
     OnReq,
     /// No retransmission at all — FEC-only mode.
     Never,
-}
-
-impl Default for ArqMode {
-    fn default() -> Self {
-        Self::OnReq
-    }
 }
 
 impl fmt::Display for ArqMode {
@@ -266,7 +256,7 @@ pub fn serialize_filter_extension(config: &str) -> Vec<u32> {
     }
     let mut bytes = config.as_bytes().to_vec();
     // Pad to 4-byte boundary
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(0);
     }
     let size_words = bytes.len() / 4;

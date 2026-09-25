@@ -165,7 +165,7 @@ impl Handshake {
         if data.len() < HANDSHAKE_CONTENT_SIZE {
             return None;
         }
-        let mut buf = &data[..];
+        let mut buf = data;
         let version = buf.get_i32();
         let ext_flags = buf.get_i32();
         let isn = buf.get_i32();
@@ -268,7 +268,7 @@ impl SrtHsExtension {
         if data.len() < 16 {
             return None;
         }
-        let mut buf = &data[..];
+        let mut buf = data;
         let srt_version = buf.get_u32();
         let srt_flags = SrtFlags::from_bits_truncate(buf.get_u32());
         let tsbpd_delay = buf.get_u32();

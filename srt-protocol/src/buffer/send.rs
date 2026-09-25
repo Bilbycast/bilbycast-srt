@@ -104,7 +104,7 @@ impl SendBuffer {
         let num_packets = if data.is_empty() {
             1
         } else {
-            (data.len() + payload_size - 1) / payload_size
+            data.len().div_ceil(payload_size)
         };
 
         if self.entries.len() + num_packets > self.max_packets {
@@ -133,7 +133,7 @@ impl SendBuffer {
         } else {
             let chunks: Vec<Bytes> = data
                 .chunks(payload_size)
-                .map(|c| Bytes::copy_from_slice(c))
+                .map(Bytes::copy_from_slice)
                 .collect();
             let last_idx = chunks.len() - 1;
 

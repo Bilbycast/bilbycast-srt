@@ -132,7 +132,7 @@ impl AckData {
         if data.len() < Self::MIN_SIZE {
             return None;
         }
-        let mut buf = &data[..];
+        let mut buf = data;
         let ack_seq = SeqNo::new(buf.get_i32());
         let (rtt, rtt_var, available_buf, recv_speed, bandwidth, recv_rate) = if buf.remaining() >= 8 {
             let rtt = buf.get_i32();
@@ -188,7 +188,7 @@ impl LossReport {
     /// Deserialize loss list from wire format.
     pub fn deserialize(data: &[u8]) -> Self {
         let mut losses = Vec::new();
-        let mut buf = &data[..];
+        let mut buf = data;
         while buf.remaining() >= 4 {
             let val = buf.get_i32();
             if val & LOSSDATA_RANGE_FIRST != 0 {
@@ -237,7 +237,7 @@ impl DropReqData {
         if data.len() < 8 {
             return None;
         }
-        let mut buf = &data[..];
+        let mut buf = data;
         let first_seq = SeqNo::new(buf.get_i32());
         let last_seq = SeqNo::new(buf.get_i32());
         Some(Self {
