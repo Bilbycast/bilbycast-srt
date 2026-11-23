@@ -10,4 +10,3 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 srt-protocol = { path = "../srt-protocol" }
-srt-transport = { path = "../srt-transport" }
